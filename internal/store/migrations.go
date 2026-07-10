@@ -3,8 +3,12 @@ package store
 import (
 	"context"
 	"fmt"
+
+	"github.com/jmoiron/sqlx"
 )
 
+// Migrations are append-only once a release has been deployed. Existing
+// installations identify migrations by their one-based position in this slice.
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
@@ -201,6 +205,23 @@ var migrations = []string{
 		updated_by TEXT NOT NULL DEFAULT '',
 		updated_at BIGINT NOT NULL
 	)`,
+	// Repair migrations for installations upgraded from fdac502. The first
+	// announcements migrations were inserted before the old audit/settings
+	// entries, whose versions were already recorded, so they were skipped.
+	`CREATE TABLE IF NOT EXISTS announcements (
+		id TEXT PRIMARY KEY,
+		title TEXT NOT NULL,
+		content TEXT NOT NULL,
+		platform TEXT NOT NULL DEFAULT '',
+		priority INTEGER NOT NULL DEFAULT 0,
+		active INTEGER NOT NULL DEFAULT 1,
+		publish_at BIGINT NOT NULL,
+		expires_at BIGINT NOT NULL DEFAULT 0,
+		created_by TEXT NOT NULL REFERENCES users(id),
+		created_at BIGINT NOT NULL,
+		updated_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_announcements_public ON announcements(active, platform, publish_at, expires_at)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -228,8 +249,52 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration %d: %w", version, err)
 		}
 	}
+	if err := s.ensureBriefingJobsPayload(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureBriefingJobsPayload(ctx context.Context, tx *sqlx.Tx) error {
+	var exists bool
+	switch s.dialect {
+	case "pgx":
+		var count int
+		if err := tx.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'briefing_jobs' AND column_name = 'payload'`); err != nil {
+			return fmt.Errorf("check briefing job payload column: %w", err)
+		}
+		exists = count > 0
+	case "sqlite":
+		rows, err := tx.QueryxContext(ctx, `PRAGMA table_info(briefing_jobs)`)
+		if err != nil {
+			return fmt.Errorf("inspect briefing job columns: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				return fmt.Errorf("scan briefing job column: %w", err)
+			}
+			if name == "payload" {
+				exists = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("inspect briefing job columns: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported database dialect %q", s.dialect)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE briefing_jobs ADD COLUMN payload TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add briefing job payload column: %w", err)
 	}
 	return nil
 }

@@ -15,7 +15,7 @@ FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S classing \
     && adduser -S -G classing -h /app classing \
-    && mkdir -p /data \
+    && mkdir -p /data/releases \
     && chown -R classing:classing /data /app
 WORKDIR /app
 COPY --from=build /out/classing-backend /app/classing-backend
@@ -24,4 +24,3 @@ EXPOSE 8080
 VOLUME ["/data"]
 ENV APP_ENV=production HTTP_ADDR=:8080
 ENTRYPOINT ["/app/classing-backend"]
-
