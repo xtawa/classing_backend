@@ -1,0 +1,31 @@
+services:
+  classing:
+    build: .
+    image: ${CLASSING_IMAGE:-classing-backend:local}
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      HTTP_ADDR: :8080
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://api-classing.underflo.ink}
+      DATABASE_DRIVER: sqlite
+      DATABASE_URL: file:/data/classing.db?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?set BOOTSTRAP_ADMIN_EMAIL in .env}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in .env}
+      EXPOSE_RESET_TOKEN: "false"
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      CLASSING_SMTP_PASSWORD: ${CLASSING_SMTP_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${CLASSING_PORT:-8080}:8080"
+    volumes:
+      - classing-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  classing-data:
+

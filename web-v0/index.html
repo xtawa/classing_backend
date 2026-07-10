@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Classing Service Console</title>
+  <link rel="icon" type="image/png" href="assets/classing-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="material.css">
+  <link rel="stylesheet" href="runtime.css">
+</head>
+<body>
+  <section class="auth-shell" id="authShell">
+    <div class="auth-brand">
+      <img src="assets/classing-icon.png" alt="Classing">
+      <div><strong>Classing</strong><span>Service Console</span></div>
+    </div>
+    <div class="auth-layout">
+      <div class="auth-story">
+        <p class="eyebrow">CLASSING CLOUD</p>
+        <h1>课程、会员与同步，汇聚在一个安全空间。</h1>
+        <p>管理员运营全部项目，普通用户只管理自己的课表、会员和每日简报。</p>
+        <div class="auth-art"><img src="assets/classing-icon.png" alt=""></div>
+      </div>
+      <form class="auth-card" id="authForm">
+        <div>
+          <p class="eyebrow" id="authEyebrow">WELCOME BACK</p>
+          <h2 id="authTitle">登录 Classing</h2>
+          <p id="authSubtitle">使用邮箱或用户名继续。</p>
+        </div>
+        <label class="form-field register-only" hidden><span>用户名</span><input id="authUsername" name="username" autocomplete="username" minlength="3" maxlength="40"></label>
+        <label class="form-field register-only" hidden><span>邮箱</span><input id="authEmail" name="email" type="email" autocomplete="email"></label>
+        <label class="form-field login-only"><span>邮箱或用户名</span><input id="authIdentifier" name="identifier" autocomplete="username"></label>
+        <label class="form-field"><span>密码</span><input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="8"></label>
+        <p class="form-error" id="authError" role="alert"></p>
+        <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
+        <div class="auth-links">
+          <button type="button" id="authSwitch">创建账户</button>
+          <button type="button" id="resetLink">忘记密码</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div class="prototype" id="prototype" hidden>
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="#overview" aria-label="Classing 控制台首页">
+        <img src="assets/classing-icon.png" alt="Classing">
+        <span>
+          <strong>Classing</strong>
+          <small>Service Console</small>
+        </span>
+      </a>
+
+      <div class="workspace-switcher">
+        <span class="workspace-mark">CL</span>
+        <span class="workspace-copy">
+          <small>当前空间</small>
+          <strong>Classing Cloud</strong>
+        </span>
+        <span class="chevron" aria-hidden="true">⌄</span>
+      </div>
+
+      <nav class="nav-list" id="primaryNav">
+        <button class="nav-item active" data-view="overview" data-admin="true">
+          <span class="nav-icon">01</span><span>运营总览</span>
+        </button>
+        <button class="nav-item" data-view="users" data-admin="true">
+          <span class="nav-icon">02</span><span>用户与权限</span>
+        </button>
+        <button class="nav-item" data-view="schedules">
+          <span class="nav-icon">03</span><span>课表项目</span>
+        </button>
+        <button class="nav-item" data-view="membership">
+          <span class="nav-icon">04</span><span>会员订阅</span>
+        </button>
+        <button class="nav-item" data-view="redeem" data-admin="true">
+          <span class="nav-icon">05</span><span>兑换码</span>
+        </button>
+        <button class="nav-item" data-view="briefings">
+          <span class="nav-icon">06</span><span>每日简报</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <span class="nav-icon">09</span><span>账户设置</span>
+        </button>
+        <button class="nav-item" data-view="mail" data-admin="true">
+          <span class="nav-icon">07</span><span>邮件与任务</span>
+        </button>
+        <button class="nav-item" data-view="audit" data-admin="true">
+          <span class="nav-icon">08</span><span>审计日志</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="service-state"><span></span>服务等待接入</div>
+        <button class="account-chip" id="accountButton" type="button">
+          <span class="avatar">A</span>
+          <span><strong id="accountChipName">账户</strong><small id="accountChipRole">加载中</small></span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main-shell">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobileMenu" aria-label="打开导航">菜单</button>
+        <div class="breadcrumbs"><span>控制台</span><b>/</b><strong id="viewCrumb">运营总览</strong></div>
+        <div class="topbar-actions">
+          <label class="search"><span>搜索</span><input type="search" placeholder="用户、课表、任务…"></label>
+          <button class="quiet-button" type="button" id="logoutButton">退出</button>
+          <button class="primary-button" type="button" id="primaryAction">新建操作</button>
+        </div>
+      </header>
+
+      <section class="content" id="content" aria-live="polite">
+        <div class="page-heading">
+          <div class="hero-copy">
+            <p class="eyebrow" id="pageEyebrow">ADMIN WORKSPACE</p>
+            <h1 id="pageTitle">一张工作台，看清系统状态</h1>
+            <p id="pageDescription">查看账户、云同步、会员和投递链路。所有指标将在接入数据库后显示真实结果。</p>
+            <div class="heading-actions">
+              <button class="quiet-button" type="button">导出视图</button>
+              <button class="primary-button" type="button" id="headingAction">创建兑换批次</button>
+            </div>
+          </div>
+          <div class="hero-visual" aria-hidden="true">
+            <span class="orbit orbit-one"></span>
+            <span class="orbit orbit-two"></span>
+            <img src="assets/classing-icon.png" alt="">
+          </div>
+        </div>
+
+        <div class="notice" role="status">
+          <span class="notice-label">V0</span>
+          <p><strong>结构预览</strong> 当前页面只验证布局、角色边界与视觉语言，不展示虚构业务数据。</p>
+          <button type="button" id="dismissNotice">知道了</button>
+        </div>
+
+        <div class="metric-grid">
+          <article class="metric-card">
+            <span class="metric-label" id="metricLabel1">注册用户</span>
+            <strong>—</strong>
+            <small id="metricHelp1">接入 PostgreSQL 后显示</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label" id="metricLabel2">有效会员</span>
+            <strong>—</strong>
+            <small id="metricHelp2">按会员有效期实时计算</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label" id="metricLabel3">今日云同步</span>
+            <strong>—</strong>
+            <small id="metricHelp3">包括成功与冲突请求</small>
+          </article>
+          <article class="metric-card emphasis">
+            <span class="metric-label" id="metricLabel4">待处理任务</span>
+            <strong>—</strong>
+            <small id="metricHelp4">简报、邮件与重试队列</small>
+          </article>
+        </div>
+
+        <div class="dashboard-grid">
+          <article class="panel chart-panel">
+            <div class="panel-heading">
+              <div><span class="panel-kicker">ACTIVITY</span><h2 id="activityTitle">服务活动</h2></div>
+              <div class="segmented" role="group" aria-label="活动时间范围">
+                <button class="active">7 天</button><button>30 天</button><button>90 天</button>
+              </div>
+            </div>
+            <div class="chart-placeholder" aria-label="服务活动图表占位">
+              <div class="chart-y"><span>高</span><span>中</span><span>低</span></div>
+              <div class="chart-stage">
+                <div class="chart-gridline"></div><div class="chart-gridline"></div><div class="chart-gridline"></div>
+                <div class="empty-chart"><span>[ 数据可视化 ]</span><small>接入指标服务后显示请求与同步趋势</small></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel health-panel" data-admin-block="true">
+            <div class="panel-heading"><div><span class="panel-kicker">SYSTEM</span><h2>组件健康</h2></div><button class="text-button">查看详情</button></div>
+            <div class="health-list">
+              <div><span class="health-dot pending"></span><p><strong>API 服务</strong><small>等待运行时探针</small></p><b>未连接</b></div>
+              <div><span class="health-dot pending"></span><p><strong>PostgreSQL</strong><small>等待数据库连接</small></p><b>未连接</b></div>
+              <div><span class="health-dot pending"></span><p><strong>邮件投递</strong><small>等待 SMTP 邮箱池</small></p><b>未配置</b></div>
+              <div><span class="health-dot pending"></span><p><strong>后台任务</strong><small>等待调度器启动</small></p><b>未启动</b></div>
+            </div>
+          </article>
+
+          <article class="panel table-panel">
+            <div class="panel-heading"><div><span class="panel-kicker">RECENT</span><h2>最近操作</h2></div><button class="text-button">全部审计记录</button></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>时间</th><th>操作主体</th><th>动作</th><th>对象</th><th>状态</th></tr></thead>
+                <tbody>
+                  <tr class="empty-row"><td colspan="5"><span>[ 审计事件 ]</span><p>服务接入后，这里展示真实的管理员与用户操作。</p></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <button class="tweaks-trigger" id="tweaksTrigger" aria-expanded="false">Tweaks</button>
+    <aside class="tweaks" id="tweaks" aria-label="原型调整面板">
+      <div class="tweaks-heading"><strong>Tweaks</strong><button id="closeTweaks" aria-label="关闭调整面板">关闭</button></div>
+      <label>动态色方案<select id="schemeSelect"><option value="classing">Classing Blue</option><option value="mint">Mint</option><option value="sunrise">Sunrise</option></select></label>
+      <label>内容密度<select id="densitySelect"><option value="comfortable">舒展</option><option value="compact">紧凑</option><option value="focus">聚焦</option></select></label>
+      <label class="toggle-row"><span>深色主题</span><input type="checkbox" id="themeToggle"></label>
+      <p>调整只影响当前浏览器中的 v0 预览。</p>
+    </aside>
+    <button class="material-fab" id="materialFab" type="button"><span>＋</span><strong>创建兑换批次</strong></button>
+    <div class="scrim" id="scrim"></div>
+  </div>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

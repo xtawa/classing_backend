@@ -1,0 +1,17 @@
+# Local runtime data
+*.db
+*.db-shm
+*.db-wal
+.env
+
+# Build and verification artifacts
+dist/
+output/
+.playwright-cli/
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
