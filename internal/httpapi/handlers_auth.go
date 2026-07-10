@@ -144,8 +144,12 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.UserByIdentifier(r.Context(), strings.ToLower(strings.TrimSpace(body.Email)))
 	if err == nil && strings.EqualFold(user.Email, body.Email) {
 		token := ids.Token(32)
-		if err := s.store.CreateResetToken(r.Context(), user.ID, auth.HashOpaqueToken(token), time.Now().Add(s.cfg.ResetTokenTTL).UnixMilli(), clientIP(r), r.UserAgent()); err == nil {
+		expiresAt := time.Now().Add(s.cfg.ResetTokenTTL).UnixMilli()
+		if err := s.store.CreateResetToken(r.Context(), user.ID, auth.HashOpaqueToken(token), expiresAt, clientIP(r), r.UserAgent()); err == nil {
 			s.audit(r, user.ID, "AUTH_PASSWORD_RESET_REQUEST", "USER", user.ID, nil)
+			if _, queueErr := s.store.QueuePasswordResetJob(r.Context(), user.ID, token, expiresAt); queueErr != nil {
+				s.log.Error("queue password reset email", "user_id", user.ID, "error", queueErr, "request_id", requestID(r))
+			}
 			if s.cfg.ExposeResetToken && s.cfg.Environment != "production" {
 				response["devResetToken"] = token
 			}

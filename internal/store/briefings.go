@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -84,7 +85,7 @@ func (s *Store) CompleteBriefingJob(ctx context.Context, jobID, mailboxID string
 	}
 	defer tx.Rollback()
 	now := nowMillis()
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE briefing_jobs SET status = 'SENT', provider_mailbox_id = ?, updated_at = ? WHERE id = ?`), mailboxID, now, jobID); err != nil {
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE briefing_jobs SET status = 'SENT', provider_mailbox_id = ?, payload = '', updated_at = ? WHERE id = ?`), mailboxID, now, jobID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET used_today = used_today + 1, updated_at = ? WHERE id = ?`), now, mailboxID); err != nil {
@@ -120,8 +121,14 @@ func (s *Store) UpsertBriefing(ctx context.Context, userID string, enabled bool,
 	if len(deliveryTime) != 5 || deliveryTime[2] != ':' {
 		return model.BriefingSubscription{}, ErrInvalid
 	}
+	if _, err := time.Parse("15:04", deliveryTime); err != nil {
+		return model.BriefingSubscription{}, ErrInvalid
+	}
 	if timezone == "" {
 		timezone = "Asia/Shanghai"
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return model.BriefingSubscription{}, ErrInvalid
 	}
 	value := 0
 	if enabled {
@@ -144,6 +151,38 @@ func (s *Store) QueueBriefingJob(ctx context.Context, userID, targetDate, channe
 	now := nowMillis()
 	item := model.BriefingJob{ID: ids.New("job"), UserID: userID, TargetDate: targetDate, Channel: channel, Status: "PENDING", ScheduledAt: scheduledAt, CreatedAt: now, UpdatedAt: now}
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`), item.ID, userID, targetDate, channel, scheduledAt, now, now)
+	return item, normalizeDBError(err)
+}
+
+func (s *Store) QueuePasswordResetJob(ctx context.Context, userID, token string, expiresAt int64) (model.BriefingJob, error) {
+	payload, err := json.Marshal(map[string]any{"token": token, "expiresAt": expiresAt})
+	if err != nil {
+		return model.BriefingJob{}, err
+	}
+	now := nowMillis()
+	item := model.BriefingJob{
+		ID:          ids.New("job"),
+		UserID:      userID,
+		Channel:     "PASSWORD_RESET",
+		Status:      "PENDING",
+		ScheduledAt: now,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Payload:     string(payload),
+	}
+	item.TargetDate = item.ID
+	_, err = s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at, payload) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`),
+		item.ID,
+		item.UserID,
+		item.TargetDate,
+		item.Channel,
+		item.ScheduledAt,
+		item.CreatedAt,
+		item.UpdatedAt,
+		item.Payload,
+	)
 	return item, normalizeDBError(err)
 }
 

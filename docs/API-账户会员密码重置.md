@@ -112,6 +112,7 @@
 规则：
 - 永远返回泛化成功文案，避免枚举邮箱存在性。
 - 后端生成一次性 reset token，写入重置表。
+- 后端同时创建 `PASSWORD_RESET` 邮件任务，通过 SMTP 邮箱池异步发送一次性 token；生产环境响应不会暴露 token。
 - token 必须带：
   - `userId`
   - `email`

@@ -72,6 +72,7 @@ type BriefingJob struct {
 	ScheduledAt       int64  `db:"scheduled_at" json:"scheduledAt"`
 	CreatedAt         int64  `db:"created_at" json:"createdAt"`
 	UpdatedAt         int64  `db:"updated_at" json:"updatedAt"`
+	Payload           string `db:"payload" json:"-"`
 }
 
 type AuditLog struct {
@@ -87,10 +88,52 @@ type AuditLog struct {
 	CreatedAt  int64  `db:"created_at" json:"createdAt"`
 }
 
+type Announcement struct {
+	ID        string `db:"id" json:"announcementId"`
+	Title     string `db:"title" json:"title"`
+	Content   string `db:"content" json:"content"`
+	Platform  string `db:"platform" json:"platform"`
+	Priority  int    `db:"priority" json:"priority"`
+	Active    int    `db:"active" json:"active"`
+	PublishAt int64  `db:"publish_at" json:"publishAt"`
+	ExpiresAt int64  `db:"expires_at" json:"expiresAt"`
+	CreatedBy string `db:"created_by" json:"createdBy"`
+	CreatedAt int64  `db:"created_at" json:"createdAt"`
+	UpdatedAt int64  `db:"updated_at" json:"updatedAt"`
+}
+
+type AppRelease struct {
+	ID                      string `db:"id" json:"releaseId"`
+	Platform                string `db:"platform" json:"platform"`
+	Channel                 string `db:"channel" json:"channel"`
+	VersionCode             int64  `db:"version_code" json:"versionCode"`
+	VersionName             string `db:"version_name" json:"versionName"`
+	MinSupportedVersionCode int64  `db:"min_supported_version_code" json:"minSupportedVersionCode"`
+	Title                   string `db:"title" json:"title"`
+	Changelog               string `db:"changelog" json:"changelog"`
+	Mandatory               int    `db:"mandatory" json:"mandatory"`
+	Status                  string `db:"status" json:"status"`
+	ArtifactFileName        string `db:"artifact_file_name" json:"artifactFileName"`
+	ArtifactStorageName     string `db:"artifact_storage_name" json:"-"`
+	ArtifactSize            int64  `db:"artifact_size" json:"artifactSize"`
+	ArtifactSHA256          string `db:"artifact_sha256" json:"sha256"`
+	ArtifactMimeType        string `db:"artifact_mime_type" json:"artifactMimeType"`
+	CreatedBy               string `db:"created_by" json:"createdBy"`
+	PublishedAt             int64  `db:"published_at" json:"publishedAt"`
+	CreatedAt               int64  `db:"created_at" json:"createdAt"`
+	UpdatedAt               int64  `db:"updated_at" json:"updatedAt"`
+}
+
 const (
 	RoleAdmin = "ADMIN"
 	RoleUser  = "USER"
 
 	StatusActive   = "ACTIVE"
 	StatusDisabled = "DISABLED"
+
+	ReleaseStatusDraft     = "DRAFT"
+	ReleaseStatusPublished = "PUBLISHED"
+	ReleasePlatformMobile  = "ANDROID_MOBILE"
+	ReleasePlatformWear    = "ANDROID_WEAR"
+	ReleaseChannelStable   = "STABLE"
 )

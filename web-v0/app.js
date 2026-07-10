@@ -20,6 +20,7 @@ const viewCopy = {
   membership: ["会员订阅", "MEMBERSHIP", "查看权益，或使用兑换码升级", "会员将解锁官方云同步与更多服务能力。"],
   redeem: ["兑换码", "REDEMPTION", "以批次管理权益发放", "创建唯一兑换码或活动码，并追踪额度与核销状态。"],
   briefings: ["每日简报", "BRIEFING", "在正确时间送达下一天课程", "选择邮箱渠道、投递时间和时区，并随时发送测试任务。"],
+  releases: ["公告与版本", "RELEASES", "从一个入口发布公告与安装包", "上传 APK、发布稳定版本，并控制客户端可见的公告。"],
   mail: ["邮件与任务", "DELIVERY", "观察邮箱池与投递队列", "管理员可以配置 SMTP Secret 引用并重试失败任务。"],
   audit: ["审计日志", "AUDIT", "关键操作都有可检索轨迹", "账户、权益、同步与系统设置变化都会留下记录。"],
   settings: ["账户设置", "SETTINGS", "管理个人资料与账户安全", "修改用户名、邮箱和密码；管理员还能调整安全的运行时设置。"],
@@ -37,7 +38,7 @@ function saveSession(session) {
 
 async function api(path, options = {}, retry = true) {
   const headers = new Headers(options.headers || {});
-  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (state.session?.accessToken) headers.set("Authorization", `Bearer ${state.session.accessToken}`);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && retry && state.session?.refreshToken && !path.endsWith("/auth/refresh")) {
@@ -220,14 +221,14 @@ async function signOut(callAPI) {
 }
 
 async function setView(view) {
-  if (!viewCopy[view] || (!isAdmin() && ["overview", "users", "redeem", "mail", "audit"].includes(view))) view = "schedules";
+  if (!viewCopy[view] || (!isAdmin() && ["overview", "users", "redeem", "mail", "audit", "releases"].includes(view))) view = "schedules";
   state.view = view;
   navItems.forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.getElementById("viewCrumb").textContent = viewCopy[view][0];
   document.body.classList.remove("nav-open");
   setLoading();
   try {
-    const renderers = { overview: renderOverview, users: renderUsers, schedules: renderSchedules, membership: renderMembership, redeem: renderRedeem, briefings: renderBriefings, mail: renderMail, audit: renderAudit, settings: renderSettings };
+    const renderers = { overview: renderOverview, users: renderUsers, schedules: renderSchedules, membership: renderMembership, redeem: renderRedeem, briefings: renderBriefings, releases: renderReleases, mail: renderMail, audit: renderAudit, settings: renderSettings };
     await renderers[view]();
   } catch (error) {
     content.innerHTML = `${hero(view)}<section class="runtime-panel"><div class="empty-state"><strong>页面暂时无法加载</strong><span>${escapeHTML(error.message)}</span><button class="tonal-button" id="retryView">重试</button></div></section>`;
@@ -236,7 +237,7 @@ async function setView(view) {
 }
 
 function handleFab() {
-  const destinations = { overview: isAdmin() ? "redeem" : "schedules", users: "users", schedules: "schedules", membership: "membership", redeem: "redeem", briefings: "briefings", mail: "mail", audit: "audit", settings: "settings" };
+  const destinations = { overview: isAdmin() ? "redeem" : "schedules", users: "users", schedules: "schedules", membership: "membership", redeem: "redeem", briefings: "briefings", releases: "releases", mail: "mail", audit: "audit", settings: "settings" };
   const destination = destinations[state.view] || "schedules";
   if (destination !== state.view) { setView(destination); return; }
   const target = document.querySelector(".runtime-form input, .runtime-form select");
@@ -321,6 +322,85 @@ async function renderBriefings() {
     <section class="runtime-panel"><form class="runtime-form" id="briefingForm"><label class="form-field"><span>启用状态</span><select name="enabled"><option value="true" ${item.enabled ? "selected" : ""}>启用</option><option value="false" ${!item.enabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>渠道</span><select name="channel"><option ${item.channel === "APP_NOTIFICATION" ? "selected" : ""}>APP_NOTIFICATION</option><option ${item.channel === "EMAIL" ? "selected" : ""}>EMAIL</option><option ${item.channel === "BOTH" ? "selected" : ""}>BOTH</option></select></label><label class="form-field"><span>时间</span><input name="time" type="time" value="${escapeHTML(item.time)}" required></label><label class="form-field"><span>时区</span><input name="timezone" value="${escapeHTML(item.timezone)}" required></label><div class="runtime-actions full"><button class="primary-button">保存配置</button><button class="tonal-button" type="button" id="testBriefing">发送测试</button></div></form></section></div>`;
   document.getElementById("briefingForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget); try { await api("/api/v1/briefings/daily", { method: "PUT", body: JSON.stringify({ enabled: data.get("enabled") === "true", channel: data.get("channel"), time: data.get("time"), timezone: data.get("timezone") }) }); toast("每日简报配置已保存"); renderBriefings(); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("testBriefing").addEventListener("click", async () => { try { await api("/api/v1/briefings/daily/test", { method: "POST", body: "{}" }); toast("测试简报任务已进入队列"); } catch (error) { toast(error.message, "error"); } });
+}
+
+async function renderReleases() {
+  const [announcementResult, releaseResult] = await Promise.all([
+    api("/api/v1/admin/announcements?limit=100"),
+    api("/api/v1/admin/releases?limit=100"),
+  ]);
+  setFab("上传安装包");
+  const announcements = announcementResult.announcements || [];
+  const releases = releaseResult.releases || [];
+  content.innerHTML = `<div class="runtime-page">${hero("releases", `<div class="hero-stat"><strong>${releases.length}</strong><span>版本记录</span></div>`)}
+    <div class="runtime-grid">
+      <section class="runtime-panel half"><div class="runtime-panel-header"><h2>发布公告</h2><span class="status-pill">客户端可见</span></div>
+        <form class="runtime-form" id="announcementForm">
+          <label class="form-field full"><span>标题</span><input name="title" maxlength="120" required></label>
+          <label class="form-field"><span>平台</span><select name="platform"><option value="">全部客户端</option><option value="ANDROID_MOBILE">Android 手机</option><option value="ANDROID_WEAR">Wear OS</option></select></label>
+          <label class="form-field"><span>优先级</span><input name="priority" type="number" value="0"></label>
+          <label class="form-field full"><span>公告内容</span><textarea name="content" rows="6" maxlength="10000" required></textarea></label>
+          <label class="form-field"><span>发布时间</span><input name="publishAt" type="datetime-local"></label>
+          <label class="form-field"><span>过期时间（可选）</span><input name="expiresAt" type="datetime-local"></label>
+          <label class="form-field full"><span><input name="active" type="checkbox" checked> 立即启用</span></label>
+          <div class="runtime-actions full"><button class="primary-button">发布公告</button></div>
+        </form>
+      </section>
+      <section class="runtime-panel half"><div class="runtime-panel-header"><h2>上传安装包</h2><span class="status-pill warn">APK</span></div>
+        <form class="runtime-form" id="releaseForm" enctype="multipart/form-data">
+          <label class="form-field"><span>平台</span><select name="platform"><option value="ANDROID_MOBILE">Android 手机</option><option value="ANDROID_WEAR">Wear OS</option></select></label>
+          <label class="form-field"><span>渠道</span><select name="channel"><option value="STABLE">稳定版</option><option value="BETA">测试版</option></select></label>
+          <label class="form-field"><span>版本号</span><input name="versionName" placeholder="1.0.5" required></label>
+          <label class="form-field"><span>版本代码</span><input name="versionCode" type="number" min="1" required></label>
+          <label class="form-field"><span>最低支持版本代码</span><input name="minSupportedVersionCode" type="number" min="0" value="0"></label>
+          <label class="form-field"><span>发布标题</span><input name="title" value="Classing 更新" required></label>
+          <label class="form-field full"><span>更新说明</span><textarea name="changelog" rows="5"></textarea></label>
+          <label class="form-field full"><span>安装包</span><input name="artifact" type="file" accept=".apk,application/vnd.android.package-archive" required></label>
+          <label class="form-field"><span><input name="mandatory" type="checkbox"> 强制更新</span></label>
+          <label class="form-field"><span><input name="publish" type="checkbox" checked> 上传后立即发布</span></label>
+          <div class="runtime-actions full"><button class="primary-button">上传安装包</button><span id="releaseUploadStatus"></span></div>
+        </form>
+      </section>
+      <section class="runtime-panel full"><div class="runtime-panel-header"><h2>当前公告</h2><span class="status-pill">${announcements.length}</span></div>
+        ${announcements.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>标题</th><th>平台</th><th>状态</th><th>发布时间</th><th>操作</th></tr></thead><tbody>${announcements.map((item) => `<tr><td><strong>${escapeHTML(item.title)}</strong><br><small>${escapeHTML(item.content).slice(0, 80)}</small></td><td>${escapeHTML(item.platform || "ALL")}</td><td>${item.active ? "启用" : "停用"}</td><td>${formatDate(item.publishAt, true)}</td><td><button class="danger-button" data-delete-announcement="${item.announcementId}">删除</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("暂无公告", "发布后客户端将在关于页读取。")}
+      </section>
+      <section class="runtime-panel full"><div class="runtime-panel-header"><h2>版本与安装包</h2><span class="status-pill">${releases.length}</span></div>
+        ${releases.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>版本</th><th>平台/渠道</th><th>安装包</th><th>状态</th><th>操作</th></tr></thead><tbody>${releases.map((item) => `<tr><td><strong>${escapeHTML(item.versionName)}</strong> (${item.versionCode})<br><small>${escapeHTML(item.title)}</small></td><td>${escapeHTML(item.platform)} / ${escapeHTML(item.channel)}</td><td>${escapeHTML(item.artifactFileName)}<br><small>${formatBytes(item.artifactSize)} · ${escapeHTML(item.sha256).slice(0, 12)}…</small></td><td>${escapeHTML(item.status)}</td><td><div class="runtime-actions">${item.status !== "PUBLISHED" ? `<button class="tonal-button" data-publish-release="${item.releaseId}">发布</button>` : `<a class="tonal-button" href="${item.downloadUrl}">下载</a>`}<button class="danger-button" data-delete-release="${item.releaseId}">删除</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("暂无版本", "上传 APK 后可立即发布或保留为草稿。")}
+      </section>
+    </div></div>`;
+
+  document.getElementById("announcementForm").addEventListener("submit", async (event) => {
+    event.preventDefault(); const data = new FormData(event.currentTarget);
+    const toMillis = (value) => value ? new Date(value).getTime() : 0;
+    try {
+      await api("/api/v1/admin/announcements", { method: "POST", body: JSON.stringify({ title: data.get("title"), content: data.get("content"), platform: data.get("platform"), priority: Number(data.get("priority")), active: data.get("active") === "on", publishAt: toMillis(data.get("publishAt")), expiresAt: toMillis(data.get("expiresAt")) }) });
+      toast("公告已发布"); renderReleases();
+    } catch (error) { toast(error.message, "error"); }
+  });
+  document.getElementById("releaseForm").addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = new FormData(event.currentTarget); const status = document.getElementById("releaseUploadStatus");
+    form.set("mandatory", String(form.get("mandatory") === "on")); form.set("publish", String(form.get("publish") === "on"));
+    status.textContent = "正在上传，请勿关闭页面…";
+    try { await api("/api/v1/admin/releases", { method: "POST", body: form }); toast("安装包已上传"); renderReleases(); }
+    catch (error) { status.textContent = ""; toast(error.message, "error"); }
+  });
+  document.querySelectorAll("[data-delete-announcement]").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确定删除该公告？")) return;
+    try { await api(`/api/v1/admin/announcements/${button.dataset.deleteAnnouncement}`, { method: "DELETE" }); toast("公告已删除"); renderReleases(); } catch (error) { toast(error.message, "error"); }
+  }));
+  document.querySelectorAll("[data-publish-release]").forEach((button) => button.addEventListener("click", async () => {
+    try { await api(`/api/v1/admin/releases/${button.dataset.publishRelease}/publish`, { method: "POST", body: "{}" }); toast("版本已发布"); renderReleases(); } catch (error) { toast(error.message, "error"); }
+  }));
+  document.querySelectorAll("[data-delete-release]").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确定删除该版本及安装包？")) return;
+    try { await api(`/api/v1/admin/releases/${button.dataset.deleteRelease}`, { method: "DELETE" }); toast("版本已删除"); renderReleases(); } catch (error) { toast(error.message, "error"); }
+  }));
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0); if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 async function renderMail() {

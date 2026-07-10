@@ -38,9 +38,13 @@ services:
       MAX_CLOUD_DOCUMENT_BYTES: ${MAX_CLOUD_DOCUMENT_BYTES:-2097152}
       EXPOSE_RESET_TOKEN: "false"
       SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      RELEASE_STORAGE_DIR: /data/releases
+      MAX_RELEASE_ARTIFACT_BYTES: ${MAX_RELEASE_ARTIFACT_BYTES:-262144000}
       CLASSING_SMTP_PASSWORD: ${CLASSING_SMTP_PASSWORD:-}
     ports:
       - "127.0.0.1:${CLASSING_PORT:-8080}:8080"
+    volumes:
+      - classing-releases:/data/releases
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
       interval: 15s
@@ -50,7 +54,7 @@ services:
 
 volumes:
   classing-postgres:
+  classing-releases:
 
 networks:
   classing:
-

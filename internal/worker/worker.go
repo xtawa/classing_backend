@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -91,7 +92,7 @@ func (w *Worker) deliverOne(ctx context.Context) {
 		_ = w.store.FailBriefingJob(ctx, job.ID, "mailbox pool exhausted", job.RetryCount)
 		return
 	}
-	if err := send(mailbox, job.Email, job.Username, job.TargetDate); err != nil {
+	if err := send(mailbox, job); err != nil {
 		w.log.Warn("send briefing", "job_id", job.ID, "mailbox_id", mailbox.ID, "error", err)
 		_ = w.store.FailBriefingJob(ctx, job.ID, err.Error(), job.RetryCount)
 		return
@@ -101,7 +102,7 @@ func (w *Worker) deliverOne(ctx context.Context) {
 	}
 }
 
-func send(mailbox model.Mailbox, recipient, username, targetDate string) error {
+func send(mailbox model.Mailbox, job store.ClaimedJob) error {
 	secretName := strings.TrimPrefix(mailbox.PasswordSecretRef, "env:")
 	if secretName == mailbox.PasswordSecretRef || secretName == "" {
 		return fmt.Errorf("unsupported mailbox secret reference")
@@ -139,16 +140,19 @@ func send(mailbox model.Mailbox, recipient, username, targetDate string) error {
 	if err := client.Mail(mailbox.FromAddress); err != nil {
 		return err
 	}
-	if err := client.Rcpt(recipient); err != nil {
+	if err := client.Rcpt(job.Email); err != nil {
 		return err
 	}
 	writer, err := client.Data()
 	if err != nil {
 		return err
 	}
-	subject := mime.BEncoding.Encode("UTF-8", "Classing 每日课程简报")
-	body := fmt.Sprintf("你好 %s，\r\n\r\n这是 %s 的 Classing 课程简报。请打开 Classing 查看最新课表、调课与同步状态。\r\n", username, targetDate)
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", mailbox.FromAddress, recipient, subject, body)
+	subjectText, body, err := mailContent(job)
+	if err != nil {
+		return err
+	}
+	subject := mime.BEncoding.Encode("UTF-8", subjectText)
+	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", mailbox.FromAddress, job.Email, subject, body)
 	if _, err := writer.Write([]byte(message)); err != nil {
 		return err
 	}
@@ -156,4 +160,32 @@ func send(mailbox model.Mailbox, recipient, username, targetDate string) error {
 		return err
 	}
 	return client.Quit()
+}
+
+func mailContent(job store.ClaimedJob) (string, string, error) {
+	switch job.Channel {
+	case "EMAIL", "EMAIL_TEST":
+		return "Classing 每日课程简报", fmt.Sprintf(
+			"你好 %s，\r\n\r\n这是 %s 的 Classing 课程简报。请打开 Classing 查看最新课表、调课与同步状态。\r\n",
+			job.Username,
+			job.TargetDate,
+		), nil
+	case "PASSWORD_RESET":
+		var payload struct {
+			Token     string `json:"token"`
+			ExpiresAt int64  `json:"expiresAt"`
+		}
+		if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil || payload.Token == "" {
+			return "", "", fmt.Errorf("invalid password reset payload")
+		}
+		expires := time.UnixMilli(payload.ExpiresAt).Format("2006-01-02 15:04:05 MST")
+		return "Classing 密码重置", fmt.Sprintf(
+			"你好 %s，\r\n\r\n你正在重置 Classing 密码。请在 Classing 的“找回密码”页面输入以下一次性验证码：\r\n\r\n%s\r\n\r\n验证码将在 %s 过期。若非本人操作，请忽略本邮件。\r\n",
+			job.Username,
+			payload.Token,
+			expires,
+		), nil
+	default:
+		return "", "", fmt.Errorf("unsupported mail job channel %s", job.Channel)
+	}
 }

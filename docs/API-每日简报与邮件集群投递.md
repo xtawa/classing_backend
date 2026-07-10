@@ -17,6 +17,7 @@
 规则：
 - `APP_NOTIFICATION` 可离线工作。
 - `EMAIL` 与 `BOTH` 要求用户已登录。
+- `time` 必须是有效的 24 小时制 `HH:mm`，`timezone` 必须是有效的 IANA 时区。
 
 ## 2. 客户端接口建议
 

@@ -29,6 +29,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
+	mux.HandleFunc("GET /api/v1/client/announcements", s.publicAnnouncements)
+	mux.HandleFunc("GET /api/v1/client/releases/latest", s.publicLatestRelease)
+	mux.HandleFunc("GET /api/v1/client/releases/{id}/download", s.publicDownloadRelease)
 
 	mux.Handle("POST /api/v1/auth/register", s.authRateLimit(http.HandlerFunc(s.register)))
 	mux.Handle("POST /api/v1/auth/login", s.authRateLimit(http.HandlerFunc(s.login)))
@@ -77,6 +80,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/admin/audit-logs", s.requireAdmin(http.HandlerFunc(s.adminListAudit)))
 	mux.Handle("GET /api/v1/admin/settings", s.requireAdmin(http.HandlerFunc(s.adminListSettings)))
 	mux.Handle("PUT /api/v1/admin/settings", s.requireAdmin(http.HandlerFunc(s.adminSetSettings)))
+	mux.Handle("GET /api/v1/admin/announcements", s.requireAdmin(http.HandlerFunc(s.adminListAnnouncements)))
+	mux.Handle("POST /api/v1/admin/announcements", s.requireAdmin(http.HandlerFunc(s.adminCreateAnnouncement)))
+	mux.Handle("PATCH /api/v1/admin/announcements/{id}", s.requireAdmin(http.HandlerFunc(s.adminUpdateAnnouncement)))
+	mux.Handle("DELETE /api/v1/admin/announcements/{id}", s.requireAdmin(http.HandlerFunc(s.adminDeleteAnnouncement)))
+	mux.Handle("GET /api/v1/admin/releases", s.requireAdmin(http.HandlerFunc(s.adminListReleases)))
+	mux.Handle("POST /api/v1/admin/releases", s.requireAdmin(http.HandlerFunc(s.adminUploadRelease)))
+	mux.Handle("POST /api/v1/admin/releases/{id}/publish", s.requireAdmin(http.HandlerFunc(s.adminPublishRelease)))
+	mux.Handle("DELETE /api/v1/admin/releases/{id}", s.requireAdmin(http.HandlerFunc(s.adminDeleteRelease)))
 
 	mux.Handle("/", s.spaHandler())
 	return s.middleware(mux)

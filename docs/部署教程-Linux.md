@@ -151,7 +151,7 @@ server {
     listen [::]:80;
     server_name api-classing.underflo.ink;
 
-    client_max_body_size 3m;
+    client_max_body_size 260m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -161,7 +161,8 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Request-ID $request_id;
-        proxy_read_timeout 60s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
         proxy_send_timeout 60s;
     }
 }
@@ -401,6 +402,17 @@ docker run --rm -v classing-data:/data -v "$PWD/backups:/backup" alpine \
   cp /data/classing.db /backup/classing-$(date +%F-%H%M).db
 docker compose -f compose.sqlite.yaml start classing
 ```
+
+### 10.3 安装包备份
+
+版本元数据位于数据库，APK 文件位于 `RELEASE_STORAGE_DIR`。两者必须在同一备份批次中保存。Compose 部署可导出版本卷：
+
+```bash
+docker run --rm -v classing-releases:/data -v "$PWD/backups:/backup" alpine \
+  tar -C /data -czf /backup/classing-releases-$(date +%F-%H%M).tar.gz .
+```
+
+SQLite Compose 的 APK 位于 `classing-data` 卷中的 `/data/releases`，备份数据库卷时一并包含。
 
 ## 11. 升级与回滚
 
