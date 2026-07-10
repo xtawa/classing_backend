@@ -1,0 +1,15 @@
+[Unit]
+Description=Check and deploy Classing backend updates
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathIsDirectory=/opt/classing/backend/.git
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/classing/backend
+ExecStart=/opt/classing/backend/deploy/auto-deploy.sh
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

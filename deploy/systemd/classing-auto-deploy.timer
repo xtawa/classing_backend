@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Classing update check every 24 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+AccuracySec=1min
+Unit=classing-auto-deploy.service
+
+[Install]
+WantedBy=timers.target
