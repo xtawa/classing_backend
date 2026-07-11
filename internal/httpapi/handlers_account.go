@@ -76,7 +76,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresAt := time.Now().Add(s.cfg.EmailVerificationTTL).UnixMilli()
-	changeRequestID, err := s.store.CreateEmailChangeRequest(r.Context(), currentUser.ID, body.Email, auth.HashOpaqueToken(code), expiresAt, clientIP(r), r.UserAgent())
+	changeRequestID, err := s.store.CreateEmailChangeRequest(r.Context(), currentUser.ID, body.Email, auth.HashOpaqueToken(code), expiresAt, s.clientIP(r), r.UserAgent())
 	if err != nil {
 		if errors.Is(err, store.ErrUnavailable) {
 			w.Header().Set("Retry-After", "60")

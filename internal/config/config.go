@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ type Config struct {
 	SchedulerEnabled       bool
 	ReleaseStorageDir      string
 	MaxReleaseArtifactSize int64
+	TrustedProxies         []*net.IPNet
 }
 
 func Load() (Config, error) {
@@ -89,7 +91,47 @@ func Load() (Config, error) {
 	if (cfg.TurnstileSiteKey == "") != (cfg.TurnstileSecret == "") {
 		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET must be configured together")
 	}
+	trusted, err := parseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TrustedProxies = trusted
 	return cfg, nil
+}
+
+func parseTrustedProxies(raw string) ([]*net.IPNet, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []*net.IPNet{
+			mustCIDR("127.0.0.0/8"),
+			mustCIDR("::1/128"),
+		}, nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]*net.IPNet, 0, len(parts))
+	for _, part := range parts {
+		cidr := strings.TrimSpace(part)
+		if cidr == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXIES invalid CIDR %q: %w", cidr, err)
+		}
+		result = append(result, ipNet)
+	}
+	if len(result) == 0 {
+		return nil, errors.New("TRUSTED_PROXIES must contain at least one CIDR, or leave unset for loopback default; use an explicit unreachable value to disable")
+	}
+	return result, nil
+}
+
+func mustCIDR(cidr string) *net.IPNet {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic(err)
+	}
+	return ipNet
 }
 
 func loadSecret() ([]byte, error) {

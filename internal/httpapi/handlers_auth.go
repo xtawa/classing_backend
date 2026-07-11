@@ -21,6 +21,11 @@ import (
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,40}$`)
 
+const (
+	loginFailureLimit  = 5
+	loginFailureWindow = 15 * time.Minute
+)
+
 type authRequest struct {
 	Username       string `json:"username"`
 	Email          string `json:"email"`
@@ -88,7 +93,7 @@ func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	expiresAt := time.Now().Add(s.cfg.EmailVerificationTTL).UnixMilli()
-	challengeID, err := s.store.CreateEmailVerificationChallenge(r.Context(), user.ID, auth.HashOpaqueToken(code), expiresAt, clientIP(r), r.UserAgent())
+	challengeID, err := s.store.CreateEmailVerificationChallenge(r.Context(), user.ID, auth.HashOpaqueToken(code), expiresAt, s.clientIP(r), r.UserAgent())
 	if err != nil {
 		if errors.Is(err, store.ErrUnavailable) {
 			w.Header().Set("Retry-After", "60")
@@ -146,7 +151,7 @@ func (s *Server) verifyTurnstile(r *http.Request, token string) (bool, error) {
 	form := url.Values{
 		"secret":   {s.cfg.TurnstileSecret},
 		"response": {strings.TrimSpace(token)},
-		"remoteip": {clientIP(r)},
+		"remoteip": {s.clientIP(r)},
 	}
 	client := &http.Client{Timeout: 8 * time.Second}
 	response, err := client.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", form)
@@ -168,8 +173,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	user, err := s.store.UserByIdentifier(r.Context(), body.Identifier)
+	identifier := strings.ToLower(strings.TrimSpace(body.Identifier))
+	if s.loginFailLimiter.isLimited(identifier) {
+		w.Header().Set("Retry-After", "900")
+		writeError(w, r, http.StatusTooManyRequests, "AUTH_LOGIN_LOCKED", "too many failed login attempts, try again later")
+		return
+	}
+	user, err := s.store.UserByIdentifier(r.Context(), identifier)
 	if err != nil || !auth.VerifyPassword(user.PasswordHash, body.Password) {
+		s.loginFailLimiter.recordFailure(identifier)
 		writeError(w, r, http.StatusUnauthorized, "AUTH_INVALID_CREDENTIALS", "identifier or password is incorrect")
 		return
 	}
@@ -177,6 +189,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusForbidden, "AUTH_ACCOUNT_DISABLED", "account is disabled")
 		return
 	}
+	s.loginFailLimiter.reset(identifier)
 	s.audit(r, user.ID, "AUTH_LOGIN", "SESSION", "", nil)
 	s.writeSession(w, r, user, http.StatusOK)
 }
@@ -189,7 +202,7 @@ func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, user model
 	}
 	refreshToken := ids.Token(32)
 	refreshExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
-	if _, err := s.store.CreateRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(refreshToken), refreshExpiresAt, clientIP(r), r.UserAgent()); err != nil {
+	if _, err := s.store.CreateRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(refreshToken), refreshExpiresAt, s.clientIP(r), r.UserAgent()); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "AUTH_SESSION_FAILED", "could not create session")
 		return
 	}
@@ -208,11 +221,11 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	refreshToken := strings.TrimSpace(body.RefreshToken)
-	cacheKey := refreshReplayKey(refreshToken, clientIP(r), r.UserAgent())
+	cacheKey := refreshReplayKey(refreshToken, s.clientIP(r), r.UserAgent())
 	session, err := s.refreshReplays.do(r.Context(), cacheKey, func() (refreshSession, error) {
 		newRefresh := ids.Token(32)
 		newExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
-		user, err := s.store.RotateRefreshToken(r.Context(), auth.HashOpaqueToken(refreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, clientIP(r), r.UserAgent())
+		user, err := s.store.RotateRefreshToken(r.Context(), auth.HashOpaqueToken(refreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, s.clientIP(r), r.UserAgent())
 		if err != nil {
 			return refreshSession{}, err
 		}
@@ -265,7 +278,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if err == nil && strings.EqualFold(user.Email, body.Email) {
 		token := ids.Token(32)
 		expiresAt := time.Now().Add(s.cfg.ResetTokenTTL).UnixMilli()
-		if err := s.store.CreateResetToken(r.Context(), user.ID, auth.HashOpaqueToken(token), expiresAt, clientIP(r), r.UserAgent()); err == nil {
+		if err := s.store.CreateResetToken(r.Context(), user.ID, auth.HashOpaqueToken(token), expiresAt, s.clientIP(r), r.UserAgent()); err == nil {
 			s.audit(r, user.ID, "AUTH_PASSWORD_RESET_REQUEST", "USER", user.ID, nil)
 			if _, queueErr := s.store.QueuePasswordResetJob(r.Context(), user.ID, token, expiresAt); queueErr != nil {
 				s.log.Error("queue password reset email", "user_id", user.ID, "error", queueErr, "request_id", requestID(r))
@@ -306,7 +319,7 @@ func (s *Server) audit(r *http.Request, actorID, action, targetType, targetID st
 	if metadata != nil {
 		encoded, _ = json.Marshal(metadata)
 	}
-	if err := s.store.Audit(r.Context(), model.AuditLog{ActorID: actorID, Action: action, TargetType: targetType, TargetID: targetID, RequestID: requestID(r), IPAddress: clientIP(r), UserAgent: r.UserAgent(), Metadata: string(encoded)}); err != nil {
+	if err := s.store.Audit(r.Context(), model.AuditLog{ActorID: actorID, Action: action, TargetType: targetType, TargetID: targetID, RequestID: requestID(r), IPAddress: s.clientIP(r), UserAgent: r.UserAgent(), Metadata: string(encoded)}); err != nil {
 		s.log.Warn("write audit log", "error", err, "request_id", requestID(r))
 	}
 }

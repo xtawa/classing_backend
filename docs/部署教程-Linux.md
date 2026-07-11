@@ -164,7 +164,11 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # 用 $remote_addr 覆盖客户端传入的 XFF，防止攻击者伪造首项绕过限流。
+        # 应用层也会校验 TRUSTED_PROXIES 并从右向左剥离可信代理，此处为纵深防御。
+        # 若前端还有 CDN 等多级代理，需把上游网段加入应用的 TRUSTED_PROXIES，
+        # 并改回 $proxy_add_x_forwarded_for，应用会正确剥离可信代理链。
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Request-ID $request_id;
         proxy_read_timeout 300s;

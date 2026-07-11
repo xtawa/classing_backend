@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"mime"
+	"net"
 	"net/http"
 	"path"
 	"strconv"
@@ -85,15 +86,78 @@ func pageParams(r *http.Request) (limit, offset int) {
 	return
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
+func (s *Server) clientIP(r *http.Request) string {
+	remoteIP := remoteAddrIP(r.RemoteAddr)
+	if !s.isTrustedProxy(remoteIP) {
+		return remoteIP
+	}
+	if forwarded := lastUntrustedProxyIP(r.Header.Get("X-Forwarded-For"), s.cfg.TrustedProxies); forwarded != "" {
 		return forwarded
 	}
-	value := r.RemoteAddr
-	if index := strings.LastIndex(value, ":"); index > -1 {
-		value = value[:index]
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" && net.ParseIP(realIP) != nil {
+		return realIP
 	}
-	return strings.Trim(value, "[]")
+	return remoteIP
+}
+
+func remoteAddrIP(remoteAddr string) string {
+	value := strings.TrimSpace(remoteAddr)
+	if value == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		return strings.Trim(value, "[]")
+	}
+	return host
+}
+
+func (s *Server) isTrustedProxy(ip string) bool {
+	if ip == "" || len(s.cfg.TrustedProxies) == 0 {
+		return false
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, cidr := range s.cfg.TrustedProxies {
+		if cidr.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastUntrustedProxyIP parses an X-Forwarded-For header and returns the
+// rightmost IP that is not a trusted proxy. Trusted proxies are stripped from
+// the right so a forged leftmost entry cannot override the real client IP
+// appended by the proxy chain.
+func lastUntrustedProxyIP(header string, trusted []*net.IPNet) string {
+	entries := strings.Split(header, ",")
+	for i := len(entries) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(entries[i])
+		if ip == "" {
+			continue
+		}
+		parsed := net.ParseIP(ip)
+		if parsed == nil {
+			continue
+		}
+		if isTrusted(parsed, trusted) {
+			continue
+		}
+		return ip
+	}
+	return ""
+}
+
+func isTrusted(ip net.IP, trusted []*net.IPNet) bool {
+	for _, cidr := range trusted {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) spaHandler() http.Handler {

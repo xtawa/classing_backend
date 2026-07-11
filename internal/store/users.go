@@ -20,6 +20,12 @@ type SessionToken struct {
 	ReplacedBy string `db:"replaced_by"`
 }
 
+// maxVerificationAttempts caps how many times a verification code or email
+// change code may be submitted incorrectly before the challenge is locked.
+// A 6-digit code has 1M possibilities; 10 attempts gives a ~0.001% brute-force
+// probability while staying forgiving for legitimate typos.
+const maxVerificationAttempts = 10
+
 func (s *Store) CreateUser(ctx context.Context, username, email, passwordHash, role string) (model.User, error) {
 	now := nowMillis()
 	user := model.User{
@@ -97,17 +103,27 @@ func (s *Store) ConsumeEmailVerificationChallenge(ctx context.Context, challenge
 	}
 	defer tx.Rollback()
 	var row struct {
-		ID        string `db:"id"`
-		UserID    string `db:"user_id"`
-		CodeHash  string `db:"code_hash"`
-		ExpiresAt int64  `db:"expires_at"`
-		UsedAt    int64  `db:"used_at"`
+		ID             string `db:"id"`
+		UserID         string `db:"user_id"`
+		CodeHash       string `db:"code_hash"`
+		ExpiresAt      int64  `db:"expires_at"`
+		UsedAt         int64  `db:"used_at"`
+		FailedAttempts int    `db:"failed_attempts"`
 	}
-	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, code_hash, expires_at, used_at FROM email_verification_challenges WHERE id = ?`), challengeID); err != nil {
+	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, code_hash, expires_at, used_at, failed_attempts FROM email_verification_challenges WHERE id = ?`), challengeID); err != nil {
 		return model.User{}, normalizeDBError(err)
 	}
 	now := nowMillis()
-	if row.UsedAt != 0 || row.ExpiresAt <= now || row.CodeHash != codeHash {
+	if row.UsedAt != 0 || row.ExpiresAt <= now || row.FailedAttempts >= maxVerificationAttempts {
+		return model.User{}, ErrForbidden
+	}
+	if row.CodeHash != codeHash {
+		if err := recordFailedAttempt(ctx, tx, `email_verification_challenges`, row.ID, row.FailedAttempts, now); err != nil {
+			return model.User{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return model.User{}, err
+		}
 		return model.User{}, ErrForbidden
 	}
 	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_verification_challenges SET used_at = ? WHERE id = ? AND used_at = 0`), now, row.ID)
@@ -125,6 +141,19 @@ func (s *Store) ConsumeEmailVerificationChallenge(ctx context.Context, challenge
 		return model.User{}, normalizeDBError(err)
 	}
 	return user, tx.Commit()
+}
+
+// recordFailedAttempt increments the failed_attempts counter for a challenge
+// row and locks it (used_at = now) once the cap is reached, so no further
+// attempts are accepted.
+func recordFailedAttempt(ctx context.Context, tx *sqlx.Tx, table, rowID string, currentFailures int, now int64) error {
+	newAttempts := currentFailures + 1
+	if newAttempts >= maxVerificationAttempts {
+		_, err := tx.ExecContext(ctx, tx.Rebind(`UPDATE `+table+` SET failed_attempts = ?, used_at = ? WHERE id = ?`), newAttempts, now, rowID)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, tx.Rebind(`UPDATE `+table+` SET failed_attempts = ? WHERE id = ?`), newAttempts, rowID)
+	return err
 }
 
 func (s *Store) BootstrapAdmin(ctx context.Context, username, email, password string) (bool, error) {
@@ -198,18 +227,28 @@ func (s *Store) ConsumeEmailChangeRequest(ctx context.Context, requestID, codeHa
 	}
 	defer tx.Rollback()
 	var row struct {
-		ID        string `db:"id"`
-		UserID    string `db:"user_id"`
-		NewEmail  string `db:"new_email"`
-		CodeHash  string `db:"code_hash"`
-		ExpiresAt int64  `db:"expires_at"`
-		UsedAt    int64  `db:"used_at"`
+		ID             string `db:"id"`
+		UserID         string `db:"user_id"`
+		NewEmail       string `db:"new_email"`
+		CodeHash       string `db:"code_hash"`
+		ExpiresAt      int64  `db:"expires_at"`
+		UsedAt         int64  `db:"used_at"`
+		FailedAttempts int    `db:"failed_attempts"`
 	}
-	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, new_email, code_hash, expires_at, used_at FROM email_change_requests WHERE id = ?`), requestID); err != nil {
+	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, new_email, code_hash, expires_at, used_at, failed_attempts FROM email_change_requests WHERE id = ?`), requestID); err != nil {
 		return model.User{}, normalizeDBError(err)
 	}
 	now := nowMillis()
-	if row.UsedAt != 0 || row.ExpiresAt <= now || row.CodeHash != codeHash {
+	if row.UsedAt != 0 || row.ExpiresAt <= now || row.FailedAttempts >= maxVerificationAttempts {
+		return model.User{}, ErrForbidden
+	}
+	if row.CodeHash != codeHash {
+		if err := recordFailedAttempt(ctx, tx, `email_change_requests`, row.ID, row.FailedAttempts, now); err != nil {
+			return model.User{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return model.User{}, err
+		}
 		return model.User{}, ErrForbidden
 	}
 	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_change_requests SET used_at = ? WHERE id = ? AND used_at = 0`), now, row.ID)
@@ -323,16 +362,17 @@ func (s *Store) ConsumeResetToken(ctx context.Context, tokenHash, newPasswordHas
 	}
 	defer tx.Rollback()
 	var row struct {
-		ID        string `db:"id"`
-		UserID    string `db:"user_id"`
-		ExpiresAt int64  `db:"expires_at"`
-		UsedAt    int64  `db:"used_at"`
+		ID             string `db:"id"`
+		UserID         string `db:"user_id"`
+		ExpiresAt      int64  `db:"expires_at"`
+		UsedAt         int64  `db:"used_at"`
+		FailedAttempts int    `db:"failed_attempts"`
 	}
-	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, expires_at, used_at FROM password_reset_tokens WHERE token_hash = ?`), tokenHash); err != nil {
+	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, expires_at, used_at, failed_attempts FROM password_reset_tokens WHERE token_hash = ?`), tokenHash); err != nil {
 		return "", normalizeDBError(err)
 	}
 	now := nowMillis()
-	if row.UsedAt != 0 || row.ExpiresAt <= now {
+	if row.UsedAt != 0 || row.ExpiresAt <= now || row.FailedAttempts >= maxVerificationAttempts {
 		return "", ErrForbidden
 	}
 	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at = 0`), now, row.ID)

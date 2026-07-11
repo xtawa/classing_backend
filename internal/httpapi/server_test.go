@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,6 +147,35 @@ func (c testClient) request(t *testing.T, method, path, token string, body any) 
 	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	result := map[string]any{}
+	_ = json.NewDecoder(response.Body).Decode(&result)
+	return response.StatusCode, result
+}
+
+func (c testClient) requestWithHeaders(t *testing.T, method, path, token string, body any, headers map[string]string) (int, map[string]any) {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		payload, _ = json.Marshal(body)
+	}
+	request, err := http.NewRequest(method, c.base+path, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
@@ -555,5 +586,240 @@ func TestAccountEmailChangeSecurity(t *testing.T) {
 	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", carolAccess, nil)
 	if status != http.StatusOK || body["account"].(map[string]any)["email"] != "carol@old.test" {
 		t.Fatalf("carol email should still be old after expired confirm: %+v", body)
+	}
+}
+
+func parseCIDRs(t *testing.T, cidrs ...string) []*net.IPNet {
+	t.Helper()
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatalf("parse CIDR %q: %v", c, err)
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func newTestServerWithTrustedProxies(t *testing.T, trustedProxies []*net.IPNet) (*httptest.Server, *store.Store, testClient) {
+	t.Helper()
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { data.Close() })
+	if _, err := data.BootstrapAdmin(ctx, "admin", "admin@classing.test", "AdminPass123!"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"),
+		AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, ResetTokenTTL: time.Minute,
+		EmailVerificationTTL: time.Minute, ExposeResetToken: true, ExposeVerificationCode: true,
+		MaxCloudDocumentSize: 1024 * 1024, TrustedProxies: trustedProxies,
+	}
+	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>Classing</title>")}}
+	testServer := httptest.NewServer(New(cfg, data, web, slog.Default()).Handler())
+	t.Cleanup(func() { testServer.Close() })
+	return testServer, data, testClient{base: testServer.URL, client: testServer.Client()}
+}
+
+func TestClientIPTrustedProxy(t *testing.T) {
+	cases := []struct {
+		name       string
+		trusted    []*net.IPNet
+		remoteAddr string
+		xff        string
+		xRealIP    string
+		want       string
+	}{
+		{"untrusted remote ignores xff", nil, "203.0.113.9:1234", "9.9.9.9", "", "203.0.113.9"},
+		{"trusted remote strips right to left", parseCIDRs(t, "127.0.0.0/8"), "127.0.0.1:1234", "9.9.9.9, 1.2.3.4", "", "1.2.3.4"},
+		{"trusted remote single xff value", parseCIDRs(t, "127.0.0.0/8"), "127.0.0.1:1234", "9.9.9.9", "", "9.9.9.9"},
+		{"all xff entries trusted falls back to remote", parseCIDRs(t, "127.0.0.0/8", "10.0.0.0/8"), "127.0.0.1:1234", "10.0.0.7", "", "127.0.0.1"},
+		{"empty xff uses x real ip", parseCIDRs(t, "127.0.0.0/8"), "127.0.0.1:1234", "", "203.0.113.5", "203.0.113.5"},
+		{"malformed xff entry skipped", parseCIDRs(t, "127.0.0.0/8"), "127.0.0.1:1234", "not-an-ip, 198.51.100.7", "", "198.51.100.7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{cfg: config.Config{TrustedProxies: tc.trusted}}
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			r.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				r.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			if tc.xRealIP != "" {
+				r.Header.Set("X-Real-IP", tc.xRealIP)
+			}
+			if got := srv.clientIP(r); got != tc.want {
+				t.Fatalf("clientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMultiLevelProxyChain(t *testing.T) {
+	trusted := parseCIDRs(t, "127.0.0.0/8", "10.0.0.0/8")
+	srv := &Server{cfg: config.Config{TrustedProxies: trusted}}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	r.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.7")
+	got := srv.clientIP(r)
+	if got != "203.0.113.5" {
+		t.Fatalf("clientIP = %q, want 203.0.113.5 (rightmost non-trusted after stripping 10.0.0.7 and 127.0.0.1)", got)
+	}
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = "127.0.0.1:5000"
+	r2.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.7, 10.0.0.8")
+	if got := srv.clientIP(r2); got != "203.0.113.5" {
+		t.Fatalf("clientIP = %q, want 203.0.113.5 (multiple trusted hops stripped)", got)
+	}
+}
+
+func TestForgedXFFRateLimitBypass(t *testing.T) {
+	t.Run("untrusted remote addr ignores xff", func(t *testing.T) {
+		_, _, client := newTestServerWithTrustedProxies(t, nil)
+		for i := 0; i < 25; i++ {
+			headers := map[string]string{"X-Forwarded-For": fmt.Sprintf("10.%d.%d.%d", i/256, i%256, i%50)}
+			status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/password/reset/request", "", map[string]any{"email": "anyone@test.local"}, headers)
+			if i < 20 {
+				if status == http.StatusTooManyRequests {
+					t.Fatalf("request %d unexpectedly rate limited (untrusted remote should still allow until IP cap)", i)
+				}
+			} else if status != http.StatusTooManyRequests {
+				t.Fatalf("request %d: expected 429 (IP rate limit), got %d", i, status)
+			}
+		}
+	})
+	t.Run("trusted remote strips forged leftmost", func(t *testing.T) {
+		_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+		for i := 0; i < 25; i++ {
+			headers := map[string]string{"X-Forwarded-For": fmt.Sprintf("%d.2.3.4, 203.0.113.55", i)}
+			status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/password/reset/request", "", map[string]any{"email": "anyone@test.local"}, headers)
+			if i < 20 {
+				if status == http.StatusTooManyRequests {
+					t.Fatalf("request %d unexpectedly rate limited before IP cap", i)
+				}
+			} else if status != http.StatusTooManyRequests {
+				t.Fatalf("request %d: expected 429 (forged leftmost must not change key), got %d", i, status)
+			}
+		}
+	})
+}
+
+func TestLoginIdentifierRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	registerUser := func(username, email, password string) string {
+		t.Helper()
+		status, body := client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": username, "email": email, "password": password})
+		if status != http.StatusAccepted {
+			t.Fatalf("register %s: %d %+v", username, status, body)
+		}
+		challenge := body["challenge"].(map[string]any)
+		status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challenge["challengeId"], "verificationCode": body["devVerificationCode"]})
+		if status != http.StatusCreated {
+			t.Fatalf("confirm %s: %d %+v", username, status, body)
+		}
+		return body["session"].(map[string]any)["accessToken"].(string)
+	}
+	registerUser("alice", "alice@test.local", "AlicePass123!")
+
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("198.51.%d.%d", i/256, i%256)}
+	}
+	wrong := map[string]any{"identifier": "alice@test.local", "password": "WrongPass99!"}
+	right := map[string]any{"identifier": "alice@test.local", "password": "AlicePass123!"}
+
+	for i := 0; i < 4; i++ {
+		if status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/login", "", wrong, xff(i)); status != http.StatusUnauthorized {
+			t.Fatalf("failure %d: expected 401, got %d", i, status)
+		}
+	}
+	if status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/login", "", right, xff(4)); status != http.StatusOK {
+		t.Fatalf("success after 4 failures should reset: expected 200, got %d", status)
+	}
+	for i := 5; i < 10; i++ {
+		if status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/login", "", wrong, xff(i)); status != http.StatusUnauthorized {
+			t.Fatalf("failure %d: expected 401, got %d", i, status)
+		}
+	}
+	status, body := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/login", "", wrong, xff(99))
+	if status != http.StatusTooManyRequests || body["code"] != "AUTH_LOGIN_LOCKED" {
+		t.Fatalf("6th failure after reset: expected 429 AUTH_LOGIN_LOCKED, got %d %+v", status, body)
+	}
+}
+
+func TestVerificationCodeBruteForceCap(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": "brute", "email": "brute@test.local", "password": "BrutePass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("register request: %d %+v", status, body)
+	}
+	challengeID := body["challenge"].(map[string]any)["challengeId"].(string)
+	correctCode := body["devVerificationCode"].(string)
+
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("203.0.%d.%d", i/256, i%256)}
+	}
+	for i := 0; i < 10; i++ {
+		status, resp := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challengeID, "verificationCode": "000000"}, xff(i))
+		if status != http.StatusBadRequest || resp["code"] != "AUTH_EMAIL_VERIFICATION_INVALID" {
+			t.Fatalf("wrong attempt %d: expected 400 AUTH_EMAIL_VERIFICATION_INVALID, got %d %+v", i, status, resp)
+		}
+	}
+	status, resp := client.requestWithHeaders(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challengeID, "verificationCode": correctCode}, xff(99))
+	if status != http.StatusBadRequest || resp["code"] != "AUTH_EMAIL_VERIFICATION_INVALID" {
+		t.Fatalf("correct code after lockout: expected 400 (locked), got %d %+v", status, resp)
+	}
+}
+
+func TestRateLimiterBounded(t *testing.T) {
+	limiter := newRateLimiterWithCap(100, time.Minute, 4)
+	for i := 0; i < 4; i++ {
+		if !limiter.allow(fmt.Sprintf("ip-%d", i)) {
+			t.Fatalf("allow ip-%d should succeed under limit", i)
+		}
+	}
+	if size := limiter.size(); size != 4 {
+		t.Fatalf("size after 4 keys = %d, want 4", size)
+	}
+	if !limiter.allow("ip-4") {
+		t.Fatal("allow ip-4 should succeed (eviction frees capacity)")
+	}
+	if size := limiter.size(); size > 4 {
+		t.Fatalf("size after 5 keys = %d, want <= 4 (eviction must bound map)", size)
+	}
+	if !limiter.allow("ip-5") {
+		t.Fatal("allow ip-5 should succeed")
+	}
+	if size := limiter.size(); size > 4 {
+		t.Fatalf("size after 6 keys = %d, want <= 4", size)
+	}
+
+	short := newRateLimiterWithCap(100, 40*time.Millisecond, 4)
+	for i := 0; i < 4; i++ {
+		short.allow(fmt.Sprintf("short-%d", i))
+	}
+	time.Sleep(60 * time.Millisecond)
+	short.allow("short-new")
+	if size := short.size(); size != 1 {
+		t.Fatalf("size after sweep = %d, want 1 (expired entries removed, only new key remains)", size)
+	}
+
+	failLimiter := newRateLimiterWithCap(5, time.Minute, 4)
+	for i := 0; i < 5; i++ {
+		failLimiter.recordFailure("alice")
+	}
+	if !failLimiter.isLimited("alice") {
+		t.Fatal("isLimited should be true after 5 failures")
+	}
+	if failLimiter.isLimited("bob") {
+		t.Fatal("isLimited should be false for unknown key")
+	}
+	failLimiter.reset("alice")
+	if failLimiter.isLimited("alice") {
+		t.Fatal("isLimited should be false after reset")
 	}
 }

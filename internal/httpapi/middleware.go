@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,44 +14,135 @@ import (
 	"github.com/xtawa/classing-backend/internal/model"
 )
 
+const defaultMaxRateEntries = 8192
+
 type rateWindow struct {
 	started time.Time
 	count   int
 }
 type rateLimiter struct {
-	mu      sync.Mutex
-	limit   int
-	window  time.Duration
-	clients map[string]rateWindow
+	mu         sync.Mutex
+	limit      int
+	window     time.Duration
+	maxEntries int
+	clients    map[string]rateWindow
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, clients: map[string]rateWindow{}}
+	return newRateLimiterWithCap(limit, window, defaultMaxRateEntries)
 }
 
+func newRateLimiterWithCap(limit int, window time.Duration, maxEntries int) *rateLimiter {
+	if maxEntries < 1 {
+		maxEntries = 1
+	}
+	return &rateLimiter{limit: limit, window: window, maxEntries: maxEntries, clients: map[string]rateWindow{}}
+}
+
+// allow checks and increments the counter for key (IP-dimension: every request
+// counts). Returns false when the key has exceeded the limit within the window.
 func (l *rateLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
-	item := l.clients[key]
-	if item.started.IsZero() || now.Sub(item.started) >= l.window {
+	item, ok := l.clients[key]
+	if !ok || now.Sub(item.started) >= l.window {
+		l.ensureCapacity(now)
 		item = rateWindow{started: now}
 	}
 	item.count++
 	l.clients[key] = item
-	if len(l.clients) > 10000 {
-		for client, value := range l.clients {
-			if now.Sub(value.started) > l.window {
-				delete(l.clients, client)
-			}
+	return item.count <= l.limit
+}
+
+// isLimited reports whether key has reached the failure limit without
+// incrementing. Used for identifier-dimension gating before credential check.
+func (l *rateLimiter) isLimited(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	item, ok := l.clients[key]
+	if !ok || time.Since(item.started) >= l.window {
+		return false
+	}
+	return item.count >= l.limit
+}
+
+// recordFailure increments the failure counter for key (identifier-dimension:
+// only failures count). Creates the entry if absent.
+func (l *rateLimiter) recordFailure(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	item, ok := l.clients[key]
+	if !ok || now.Sub(item.started) >= l.window {
+		l.ensureCapacity(now)
+		item = rateWindow{started: now}
+	}
+	item.count++
+	l.clients[key] = item
+}
+
+// reset clears the counter for key. Called on success so a legit user is not
+// locked out by prior typos.
+func (l *rateLimiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.clients, key)
+}
+
+// size returns the current number of tracked keys (for tests).
+func (l *rateLimiter) size() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.clients)
+}
+
+func (l *rateLimiter) ensureCapacity(now time.Time) {
+	if len(l.clients) < l.maxEntries {
+		return
+	}
+	l.sweepExpired(now)
+	if len(l.clients) >= l.maxEntries {
+		l.evictOldest()
+	}
+}
+
+func (l *rateLimiter) sweepExpired(now time.Time) {
+	for key, value := range l.clients {
+		if now.Sub(value.started) >= l.window {
+			delete(l.clients, key)
 		}
 	}
-	return item.count <= l.limit
+}
+
+// evictOldest drops the oldest 25% of entries (by started time) so the map
+// stays bounded under high-cardinality key injection. Single O(n log n) pass.
+func (l *rateLimiter) evictOldest() {
+	target := l.maxEntries * 3 / 4
+	if target < 1 {
+		target = 1
+	}
+	if len(l.clients) <= target {
+		return
+	}
+	type entry struct {
+		key     string
+		started time.Time
+	}
+	entries := make([]entry, 0, len(l.clients))
+	for key, value := range l.clients {
+		entries = append(entries, entry{key: key, started: value.started})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].started.Before(entries[j].started) })
+	toEvict := len(entries) - target
+	for i := 0; i < toEvict; i++ {
+		delete(l.clients, entries[i].key)
+	}
 }
 
 func (s *Server) authRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.limiter.allow(clientIP(r)) {
+		if !s.limiter.allow(s.clientIP(r)) {
 			w.Header().Set("Retry-After", "60")
 			writeError(w, r, http.StatusTooManyRequests, "AUTH_RATE_LIMITED", "too many authentication requests")
 			return
@@ -61,7 +153,7 @@ func (s *Server) authRateLimit(next http.Handler) http.Handler {
 
 func (s *Server) publicClientRateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.publicLimiter.allow(clientIP(r) + ":" + r.URL.Path) {
+		if !s.publicLimiter.allow(s.clientIP(r) + ":" + r.URL.Path) {
 			w.Header().Set("Retry-After", "60")
 			writeError(w, r, http.StatusTooManyRequests, "CLIENT_RATE_LIMITED", "maximum 3 requests per minute")
 			return

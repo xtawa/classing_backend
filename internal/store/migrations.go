@@ -275,6 +275,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureBriefingJobsPayload(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureFailedAttemptsColumns(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
@@ -320,4 +323,81 @@ func (s *Store) ensureBriefingJobsPayload(ctx context.Context, tx *sqlx.Tx) erro
 		return fmt.Errorf("add briefing job payload column: %w", err)
 	}
 	return nil
+}
+
+// ensureFailedAttemptsColumns idempotently adds the failed_attempts column to
+// the verification-code and reset-token tables. It skips tables that do not
+// exist yet (legacy databases where the CREATE TABLE migration was recorded
+// but never actually ran), so it is safe to call after every migration pass.
+func (s *Store) ensureFailedAttemptsColumns(ctx context.Context, tx *sqlx.Tx) error {
+	for _, table := range []string{"email_verification_challenges", "email_change_requests", "password_reset_tokens"} {
+		present, err := s.tableExists(ctx, tx, table)
+		if err != nil {
+			return fmt.Errorf("check table %s: %w", table, err)
+		}
+		if !present {
+			continue
+		}
+		hasColumn, err := s.columnExists(ctx, tx, table, "failed_attempts")
+		if err != nil {
+			return fmt.Errorf("check %s.failed_attempts: %w", table, err)
+		}
+		if hasColumn {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0`, table)); err != nil {
+			return fmt.Errorf("add %s.failed_attempts: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) tableExists(ctx context.Context, tx *sqlx.Tx, table string) (bool, error) {
+	switch s.dialect {
+	case "pgx":
+		var count int
+		if err := tx.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1`, table); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	case "sqlite":
+		var count int
+		if err := tx.GetContext(ctx, &count, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	default:
+		return false, fmt.Errorf("unsupported database dialect %q", s.dialect)
+	}
+}
+
+func (s *Store) columnExists(ctx context.Context, tx *sqlx.Tx, table, column string) (bool, error) {
+	switch s.dialect {
+	case "pgx":
+		var count int
+		if err := tx.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`, table, column); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	case "sqlite":
+		rows, err := tx.QueryxContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				return false, err
+			}
+			if name == column {
+				return true, nil
+			}
+		}
+		return false, rows.Err()
+	default:
+		return false, fmt.Errorf("unsupported database dialect %q", s.dialect)
+	}
 }

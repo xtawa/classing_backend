@@ -12,26 +12,28 @@ import (
 )
 
 type Server struct {
-	cfg            config.Config
-	store          *store.Store
-	tokens         *auth.Manager
-	web            fs.FS
-	log            *slog.Logger
-	limiter        *rateLimiter
-	publicLimiter  *rateLimiter
-	refreshReplays *refreshReplayCache
+	cfg              config.Config
+	store            *store.Store
+	tokens           *auth.Manager
+	web              fs.FS
+	log              *slog.Logger
+	limiter          *rateLimiter
+	publicLimiter    *rateLimiter
+	loginFailLimiter *rateLimiter
+	refreshReplays   *refreshReplayCache
 }
 
 func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *Server {
 	return &Server{
-		cfg:            cfg,
-		store:          data,
-		tokens:         auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL),
-		web:            web,
-		log:            logger,
-		limiter:        newRateLimiter(20, time.Minute),
-		publicLimiter:  newRateLimiter(3, time.Minute),
-		refreshReplays: newRefreshReplayCache(5 * time.Second),
+		cfg:              cfg,
+		store:            data,
+		tokens:           auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL),
+		web:              web,
+		log:              logger,
+		limiter:          newRateLimiter(20, time.Minute),
+		publicLimiter:    newRateLimiter(3, time.Minute),
+		loginFailLimiter: newRateLimiter(loginFailureLimit, loginFailureWindow),
+		refreshReplays:   newRefreshReplayCache(5 * time.Second),
 	}
 }
 
