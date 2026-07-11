@@ -67,7 +67,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.getBriefing)))
 	mux.Handle("PUT /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.putBriefing)))
 	mux.Handle("DELETE /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.deleteBriefing)))
-	mux.Handle("POST /api/v1/briefings/daily/test", s.requireAuth(http.HandlerFunc(s.testBriefing)))
+	mux.Handle("POST /api/v1/briefings/daily/test", s.requireAuth(http.HandlerFunc(s.testBriefingV2)))
 
 	mux.Handle("GET /api/v1/admin/dashboard", s.requireAdmin(http.HandlerFunc(s.adminDashboard)))
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(http.HandlerFunc(s.adminListUsers)))

@@ -5,7 +5,9 @@
 - 固定基址：`https://api-classing.underflo.ink`
 - 路径前缀：`/api/v1/cloud/official`
 - 客户端不可修改域名。
-- 非会员可见但不可用。
+- 登录后默认可用于设置同步；会员才可同步课表。
+- 非会员读取官方云文档时只返回 `mobile.settings`、`wear.settings`、`cloud.config`、`app.commands` 等设置/命令域；服务端会保留既有课表域但不会向非会员下发。
+- 非会员写入官方云文档时，服务端只合并设置/命令域，忽略 `timetable.lessons` 与 `timetable.exceptions`，因此无法通过官方云同步课表。
 
 ## 2. 客户端配置模型
 ```json
@@ -52,7 +54,8 @@
   - `Idempotency-Key: <uuid>`
 
 ### `POST /api/v1/cloud/official/test`
-- 测试账号是否具备官方云权限与读写能力。
+- 测试账号是否具备官方云连接能力。
+- 登录用户均返回成功；响应中的 `canSyncSettings=true` 表示设置同步可用，`canSyncTimetable` 仅在会员有效时为 `true`。
 
 ### `GET /api/v1/cloud/official/config`
 - 可选接口，返回服务端下发的限制、限流策略、最大文档大小等。
@@ -61,6 +64,7 @@
 - 带 Bearer token 的 SSE 事件流。
 - `Last-Event-ID` 使用已知云文档版本。
 - 云文档版本变化时发送 `settings` 事件，Web 收到后重新拉取并合并设置。
+- 该事件流登录即可使用，用于 Web 与客户端设置实时同步；客户端即便选择 Google Drive 或 WebDAV 作为课表云同步方式，也会继续使用官方云同步设置。
 
 ## 5. 幂等与并发
 - 每次写入必须带 `Idempotency-Key`。
@@ -69,10 +73,10 @@
   - `409 Conflict`
   - 或 `412 Precondition Failed`
 
-## 6. 会员校验失败码
-- `OFFICIAL_CLOUD_MEMBERSHIP_REQUIRED`
-- `OFFICIAL_CLOUD_ACCOUNT_REQUIRED`
-- `OFFICIAL_CLOUD_PERMISSION_DENIED`
+## 6. 权限与会员规则
+- `OFFICIAL_CLOUD_MEMBERSHIP_REQUIRED` 仅适用于必须同步课表的操作。
+- 设置同步不要求会员，只要求有效登录态。
+- 非会员提交课表域不会生效，服务端只合并允许的设置域。
 
 ## 7. Scope 合并规则
 - 客户端本地 `syncScopes` 决定参与合并的 Domain。

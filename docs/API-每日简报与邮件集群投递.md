@@ -40,10 +40,19 @@
 
 ### `POST /api/v1/briefings/daily/test`
 - 试发或预览。
+- 请求体可指定测试渠道：
+```json
+{
+  "channel": "APP_NOTIFICATION"
+}
+```
+- `channel=APP_NOTIFICATION` 时，后端不会创建邮件任务，而是向官方云 `app.commands` 写入 `DAILY_BRIEFING_TEST` 命令；已登录客户端通过官方设置同步实时收到命令后弹出 App 通知。
+- `channel=EMAIL` 时创建 `EMAIL_TEST` 邮件任务；`channel=BOTH` 同时创建邮件任务并下发 App 测试命令。
 - 响应可返回：
   - 纯文本预览
   - HTML 预览
   - 本次将使用的发件邮箱标识
+  - `appNotificationQueued`
 
 ## 3. 后端任务模型
 - `briefing_subscription`

@@ -189,6 +189,48 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 		t.Fatalf("create timetable: %d %+v", status, body)
 	}
 
+	status, body = client.request(t, http.MethodGet, "/api/v1/cloud/official/ping", access, nil)
+	if status != http.StatusOK || body["canSyncSettings"] != true || body["canSyncTimetable"] != false {
+		t.Fatalf("non-member official cloud ping: %d %+v", status, body)
+	}
+	settingsDoc := map[string]any{
+		"format":    "classing_cloud_sync_v2",
+		"updatedAt": float64(1000),
+		"records": map[string]any{
+			"mobile.settings":   []any{map[string]any{"id": "showWeekend", "payload": `{"value":false}`, "version": map[string]any{"counter": float64(1), "deviceId": "test", "changedAt": float64(1000)}}},
+			"timetable.lessons": []any{map[string]any{"id": "lesson-1", "payload": `{"id":"lesson-1","title":"Math"}`, "version": map[string]any{"counter": float64(2), "deviceId": "test", "changedAt": float64(1000)}}},
+		},
+		"changes": []any{},
+		"devices": []any{},
+	}
+	status, body = client.request(t, http.MethodPut, "/api/v1/cloud/official/document", access, settingsDoc)
+	if status != http.StatusOK {
+		t.Fatalf("non-member official settings put: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/cloud/official/document", access, nil)
+	if status != http.StatusOK {
+		t.Fatalf("non-member official settings get: %d %+v", status, body)
+	}
+	records := body["records"].(map[string]any)
+	if _, ok := records["mobile.settings"]; !ok {
+		t.Fatalf("non-member cloud document missing settings: %+v", body)
+	}
+	if _, ok := records["timetable.lessons"]; ok {
+		t.Fatalf("non-member cloud document exposed timetable: %+v", body)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/briefings/daily/test", access, map[string]any{"channel": "APP_NOTIFICATION"})
+	if status != http.StatusAccepted || body["appNotificationQueued"] != true {
+		t.Fatalf("app briefing test: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/cloud/official/document", access, nil)
+	if status != http.StatusOK {
+		t.Fatalf("cloud document after app test: %d %+v", status, body)
+	}
+	records = body["records"].(map[string]any)
+	if commands, ok := records["app.commands"].([]any); !ok || len(commands) == 0 {
+		t.Fatalf("app briefing command missing: %+v", body)
+	}
+
 	status, adminBody := client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "admin@classing.test", "password": "AdminPass123!"})
 	if status != http.StatusOK {
 		t.Fatalf("admin login: %d %+v", status, adminBody)
