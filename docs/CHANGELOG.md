@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-10 · 注册验证、实时设置同步与管理台维护
+
+### Added
+
+- 注册新增 Cloudflare Turnstile 配置接口、SMTP 验证码申请/确认接口及待验证账户状态。
+- 新增 `EMAIL_VERIFICATION` 邮件任务、一次性验证码表和 10 分钟默认有效期。
+- Web 设置页可读写官方云 v2 的 `mobile.settings` Domain，并通过带认证的 SSE 事件流实时感知版本变化。
+- 管理台用户目录新增会员吊销；SMTP 邮箱新增编辑和删除操作及 `PUT /api/v1/admin/mailboxes/{id}`。
+- Android 注册页新增内嵌 Turnstile 与 SMTP 验证码两阶段交互。
+- Android 设置新增 Dev Mode、Web 入口、新学期切换；设置分组整合为课程显示、提醒和关于。
+- 课表导入的 ICS、JSON、手动录入改为互斥折叠菜单。
+
+### Changed
+
+- Google Drive 与官方云连接测试不再被“同步总开关”或本地会员缓存提前拦截；官方云 access token 到期时自动使用 refresh token 轮换。
+- 已是会员的账户页隐藏兑换入口。
+- 完整移除 mobile 与 Wear 的无障碍保活服务、manifest 声明、设置项和同步字段。
+
+### Security
+
+- 公告和最新版本接口服务端按 IP/路径限制为每分钟 3 次，Android 端同时执行本地 3 次/分钟保护。
+- Turnstile secret 只读取环境变量；SMTP 继续只保存 `env:` Secret 引用，不落库明文密码。
+
+### Docs
+
+- 新增《API-注册验证与Web设置实时同步》，同步更新官方云和管理台接口清单。
+
 ## 2026-07-10 · 公告与版本发布
 
 ### Added

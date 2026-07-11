@@ -164,16 +164,21 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 	if _, err := data.BootstrapAdmin(ctx, "admin", "admin@classing.test", "AdminPass123!"); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, ResetTokenTTL: time.Minute, ExposeResetToken: true, MaxCloudDocumentSize: 1024 * 1024}
+	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, ResetTokenTTL: time.Minute, EmailVerificationTTL: time.Minute, ExposeResetToken: true, ExposeVerificationCode: true, MaxCloudDocumentSize: 1024 * 1024}
 	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>Classing</title>")}}
 	var files fs.FS = web
 	testServer := httptest.NewServer(New(cfg, data, files, slog.Default()).Handler())
 	defer testServer.Close()
 	client := testClient{base: testServer.URL, client: testServer.Client()}
 
-	status, body := client.request(t, http.MethodPost, "/api/v1/auth/register", "", map[string]any{"username": "alice", "email": "alice@example.com", "password": "UserPass123!"})
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": "alice", "email": "alice@example.com", "password": "UserPass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("request registration verification: %d %+v", status, body)
+	}
+	challenge := body["challenge"].(map[string]any)
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challenge["challengeId"], "verificationCode": body["devVerificationCode"]})
 	if status != http.StatusCreated {
-		t.Fatalf("register: %d %+v", status, body)
+		t.Fatalf("confirm registration verification: %d %+v", status, body)
 	}
 	session := body["session"].(map[string]any)
 	access := session["accessToken"].(string)
@@ -197,6 +202,10 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 	status, body = client.request(t, http.MethodPost, "/api/v1/membership/redeem", access, map[string]any{"code": code})
 	if status != http.StatusOK || body["membership"].(map[string]any)["isMember"] != true {
 		t.Fatalf("redeem: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/cloud/official/ping", access, nil)
+	if status != http.StatusOK || body["status"] != "ok" {
+		t.Fatalf("official cloud ping: %d %+v", status, body)
 	}
 
 	status, body = client.request(t, http.MethodPut, "/api/v1/account/password", access, map[string]any{"currentPassword": "UserPass123!", "newPassword": "UserPass456!"})
@@ -225,7 +234,13 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 		t.Fatal("password reset token was not exposed in test mode")
 	}
 	jobs, total, err := data.ListBriefingJobs(ctx, 10, 0)
-	if err != nil || total != 1 || jobs[0].Channel != "PASSWORD_RESET" {
+	hasResetJob := false
+	for _, job := range jobs {
+		if job.Channel == "PASSWORD_RESET" {
+			hasResetJob = true
+		}
+	}
+	if err != nil || total != 2 || !hasResetJob {
 		t.Fatalf("password reset email job: total=%d jobs=%+v err=%v", total, jobs, err)
 	}
 	status, body = client.request(t, http.MethodPost, "/api/v1/auth/password/reset/confirm", "", map[string]any{"token": resetToken, "newPassword": "UserPass789!"})

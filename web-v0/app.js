@@ -4,6 +4,10 @@ const state = {
   view: "overview",
   authMode: "login",
   refreshing: null,
+  registrationChallengeId: "",
+  registrationConfig: null,
+  turnstileWidgetId: null,
+  settingsStreamAbort: null,
 };
 
 const authShell = document.getElementById("authShell");
@@ -167,9 +171,11 @@ function setTweaks(open) {
 
 function setAuthMode(mode) {
   state.authMode = mode;
+  state.registrationChallengeId = "";
   const register = mode === "register";
   document.querySelectorAll(".register-only").forEach((item) => { item.hidden = !register; });
   document.querySelectorAll(".login-only").forEach((item) => { item.hidden = register; });
+  document.querySelectorAll(".verification-only").forEach((item) => { item.hidden = true; });
   document.getElementById("authTitle").textContent = register ? "创建 Classing 账户" : "登录 Classing";
   document.getElementById("authSubtitle").textContent = register ? "注册后即可创建课表和管理会员。" : "使用邮箱或用户名继续。";
   document.getElementById("authEyebrow").textContent = register ? "GET STARTED" : "WELCOME BACK";
@@ -178,6 +184,27 @@ function setAuthMode(mode) {
   document.getElementById("resetLink").hidden = register;
   document.getElementById("authPassword").autocomplete = register ? "new-password" : "current-password";
   document.getElementById("authError").textContent = "";
+  if (register) prepareRegistrationSecurity();
+}
+
+async function prepareRegistrationSecurity() {
+  try {
+    state.registrationConfig = await (await fetch("/api/v1/auth/registration/config")).json();
+    if (!state.registrationConfig.turnstileRequired || !state.registrationConfig.turnstileSiteKey) return;
+    if (!window.turnstile) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        script.async = true; script.defer = true; script.onload = resolve; script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+    const container = document.getElementById("turnstileContainer");
+    container.innerHTML = "";
+    state.turnstileWidgetId = window.turnstile.render(container, { sitekey: state.registrationConfig.turnstileSiteKey });
+  } catch {
+    document.getElementById("authError").textContent = "人机验证组件加载失败，请稍后重试";
+  }
 }
 
 async function submitAuth(event) {
@@ -190,13 +217,33 @@ async function submitAuth(event) {
     const payload = register
       ? { username: document.getElementById("authUsername").value, email: document.getElementById("authEmail").value, password: document.getElementById("authPassword").value }
       : { identifier: document.getElementById("authIdentifier").value, password: document.getElementById("authPassword").value };
-    const response = await fetch(`/api/v1/auth/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    let path = "/api/v1/auth/login";
+    if (register && !state.registrationChallengeId) {
+      path = "/api/v1/auth/register/email/request";
+      payload.turnstileToken = state.turnstileWidgetId !== null && window.turnstile ? window.turnstile.getResponse(state.turnstileWidgetId) : "";
+    } else if (register) {
+      path = "/api/v1/auth/register/email/confirm";
+      payload.challengeId = state.registrationChallengeId;
+      payload.verificationCode = document.getElementById("authVerificationCode").value;
+    }
+    const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || "认证失败");
+    if (register && !body.session) {
+      state.registrationChallengeId = body.challenge.challengeId;
+      document.querySelectorAll(".verification-only").forEach((item) => { item.hidden = false; });
+      document.getElementById("authSubtitle").textContent = body.devVerificationCode ? `验证码已发送（开发环境：${body.devVerificationCode}）` : "验证码已发送至邮箱，请完成验证。";
+      button.textContent = "验证并创建账户";
+      document.getElementById("authVerificationCode").focus();
+      return;
+    }
     saveSession(body.session);
     state.account = (await api("/api/v1/account/me")).account;
     showConsole();
-  } catch (error) { errorNode.textContent = error.message; }
+  } catch (error) {
+    errorNode.textContent = error.message;
+    if (state.authMode === "register" && !state.registrationChallengeId && state.turnstileWidgetId !== null && window.turnstile) window.turnstile.reset(state.turnstileWidgetId);
+  }
   finally { button.disabled = false; }
 }
 
@@ -223,6 +270,10 @@ async function signOut(callAPI) {
 async function setView(view) {
   if (!viewCopy[view] || (!isAdmin() && ["overview", "users", "redeem", "mail", "audit", "releases"].includes(view))) view = "schedules";
   state.view = view;
+  if (view !== "settings" && state.settingsStreamAbort) {
+    state.settingsStreamAbort.abort();
+    state.settingsStreamAbort = null;
+  }
   navItems.forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.getElementById("viewCrumb").textContent = viewCopy[view][0];
   document.body.classList.remove("nav-open");
@@ -266,7 +317,7 @@ async function renderUsers() {
   content.innerHTML = `<div class="runtime-page">${hero("users", `<div class="hero-stat"><strong>${response.total}</strong><span>账户总数</span></div>`)}
     <section class="runtime-panel"><div class="runtime-panel-header"><h2>用户目录</h2><span class="status-pill">${response.total} 个账户</span></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
-    ${response.users.map((user) => `<tr><td><strong>${escapeHTML(user.username)}</strong><br><small>${escapeHTML(user.email)}</small></td><td><select data-user-role="${user.userId}"><option ${user.role === "USER" ? "selected" : ""}>USER</option><option ${user.role === "ADMIN" ? "selected" : ""}>ADMIN</option></select></td><td><select data-user-status="${user.userId}"><option ${user.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option ${user.status === "DISABLED" ? "selected" : ""}>DISABLED</option></select></td><td>${formatDate(user.createdAt)}</td><td><button class="tonal-button" data-save-user="${user.userId}">保存</button></td></tr>`).join("")}
+    ${response.users.map((user) => `<tr><td><strong>${escapeHTML(user.username)}</strong><br><small>${escapeHTML(user.email)}</small><br><small>${user.membership?.isMember ? `会员 ${escapeHTML(user.membership.tier)} · ${formatDate(user.membership.expiresAt)}` : "FREE"}</small></td><td><select data-user-role="${user.userId}"><option ${user.role === "USER" ? "selected" : ""}>USER</option><option ${user.role === "ADMIN" ? "selected" : ""}>ADMIN</option></select></td><td><select data-user-status="${user.userId}"><option ${user.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option ${user.status === "DISABLED" ? "selected" : ""}>DISABLED</option></select></td><td>${formatDate(user.createdAt)}</td><td><div class="runtime-actions"><button class="tonal-button" data-save-user="${user.userId}">保存</button>${user.membership?.isMember ? `<button class="danger-button" data-revoke-membership="${user.userId}">吊销会员</button>` : ""}</div></td></tr>`).join("")}
     </tbody></table></div></section></div>`;
   document.querySelectorAll("[data-save-user]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.saveUser;
@@ -274,6 +325,10 @@ async function renderUsers() {
       await api(`/api/v1/admin/users/${id}`, { method: "PATCH", body: JSON.stringify({ role: document.querySelector(`[data-user-role='${id}']`).value, status: document.querySelector(`[data-user-status='${id}']`).value }) });
       toast("用户权限已更新");
     } catch (error) { toast(error.message, "error"); }
+  }));
+  document.querySelectorAll("[data-revoke-membership]").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确定吊销该用户的会员权益？")) return;
+    try { await api("/api/v1/admin/membership/revoke", { method: "POST", body: JSON.stringify({ userId: button.dataset.revokeMembership }) }); toast("会员权益已吊销"); renderUsers(); } catch (error) { toast(error.message, "error"); }
   }));
 }
 
@@ -299,11 +354,11 @@ async function renderSchedules() {
 
 async function renderMembership() {
   const response = await api("/api/v1/membership/status"); const item = response.membership;
-  setFab("兑换会员");
+  setFab(item.isMember ? "会员权益" : "兑换会员");
   content.innerHTML = `<div class="runtime-page">${hero("membership", `<div class="hero-stat"><strong>${item.isMember ? escapeHTML(item.tier) : "FREE"}</strong><span>${item.isMember ? `有效至 ${formatDate(item.expiresAt)}` : "当前方案"}</span></div>`)}
     <div class="runtime-grid"><section class="runtime-panel half"><h2>当前权益</h2><div class="empty-state"><span class="status-pill ${item.isMember ? "" : "warn"}">${item.isMember ? "会员有效" : "免费账户"}</span><strong>${item.isMember ? escapeHTML(item.tier) : "尚未订阅会员"}</strong><span>${item.isMember ? `到期时间：${formatDate(item.expiresAt, true)}` : "使用兑换码即可升级并解锁官方云同步。"}</span></div></section>
-    <section class="runtime-panel half"><div class="runtime-panel-header"><h2>兑换会员</h2></div><form class="runtime-form" id="redeemForm"><label class="form-field full"><span>兑换码</span><input name="code" required placeholder="CLS-XXXX-XXXX-XXXX"></label><div class="runtime-actions full"><button class="primary-button">立即兑换</button></div></form></section></div></div>`;
-  document.getElementById("redeemForm").addEventListener("submit", async (event) => { event.preventDefault(); const code = new FormData(event.currentTarget).get("code"); try { await api("/api/v1/membership/redeem", { method: "POST", body: JSON.stringify({ code }) }); toast("会员权益已更新"); renderMembership(); } catch (error) { toast(error.message, "error"); } });
+    ${item.isMember ? "" : `<section class="runtime-panel half"><div class="runtime-panel-header"><h2>兑换会员</h2></div><form class="runtime-form" id="redeemForm"><label class="form-field full"><span>兑换码</span><input name="code" required placeholder="CLS-XXXX-XXXX-XXXX"></label><div class="runtime-actions full"><button class="primary-button">立即兑换</button></div></form></section>`}</div></div>`;
+  document.getElementById("redeemForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const code = new FormData(event.currentTarget).get("code"); try { await api("/api/v1/membership/redeem", { method: "POST", body: JSON.stringify({ code }) }); toast("会员权益已更新"); renderMembership(); } catch (error) { toast(error.message, "error"); } });
 }
 
 async function renderRedeem() {
@@ -407,9 +462,19 @@ async function renderMail() {
   const [mailboxes, jobs] = await Promise.all([api("/api/v1/admin/mailboxes"), api("/api/v1/admin/briefing-jobs?limit=50")]);
   setFab("添加邮箱");
   content.innerHTML = `<div class="runtime-page">${hero("mail", `<div class="hero-stat"><strong>${jobs.total}</strong><span>投递任务</span></div>`)}<div class="runtime-grid"><section class="runtime-panel half"><h2>添加 SMTP 邮箱</h2><form class="runtime-form" id="mailboxForm"><label class="form-field"><span>名称</span><input name="name" required></label><label class="form-field"><span>发件地址</span><input name="fromAddress" type="email" required></label><label class="form-field"><span>SMTP Host</span><input name="smtpHost" required></label><label class="form-field"><span>端口</span><input name="smtpPort" type="number" value="587" required></label><label class="form-field"><span>用户名</span><input name="username" required></label><label class="form-field"><span>密码 Secret 引用</span><input name="passwordSecretRef" value="env:SMTP_PASSWORD" required></label><label class="form-field"><span>每日额度</span><input name="dailyQuota" type="number" value="500" required></label><div class="runtime-actions full"><button class="primary-button">添加邮箱</button></div></form></section>
-    <section class="runtime-panel half"><h2>邮箱池</h2>${mailboxes.mailboxes.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>邮箱</th><th>Host</th><th>额度</th></tr></thead><tbody>${mailboxes.mailboxes.map((item) => `<tr><td>${escapeHTML(item.name)}<br><small>${escapeHTML(item.fromAddress)}</small></td><td>${escapeHTML(item.smtpHost)}:${item.smtpPort}</td><td>${item.usedToday}/${item.dailyQuota}</td></tr>`).join("")}</tbody></table></div>` : emptyState("邮箱池未配置", "添加邮箱后，投递工作器会从环境变量读取密码。")}</section>
+    <section class="runtime-panel half"><h2>邮箱池</h2>${mailboxes.mailboxes.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>邮箱</th><th>Host</th><th>额度</th><th>操作</th></tr></thead><tbody>${mailboxes.mailboxes.map((item) => `<tr><td>${escapeHTML(item.name)}<br><small>${escapeHTML(item.fromAddress)}</small></td><td>${escapeHTML(item.smtpHost)}:${item.smtpPort}</td><td>${item.usedToday}/${item.dailyQuota}</td><td><div class="runtime-actions"><button class="tonal-button" data-edit-mailbox="${item.mailboxId}">编辑</button><button class="danger-button" data-delete-mailbox="${item.mailboxId}">删除</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("邮箱池未配置", "添加邮箱后，投递工作器会从环境变量读取密码。")}</section>
     <section class="runtime-panel full"><div class="runtime-panel-header"><h2>最近任务</h2><span class="status-pill">${jobs.total}</span></div>${jobs.jobs.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>日期</th><th>重试</th></tr></thead><tbody>${jobs.jobs.map((item) => `<tr><td>${escapeHTML(item.jobId)}</td><td>${escapeHTML(item.userId)}</td><td>${escapeHTML(item.status)}</td><td>${escapeHTML(item.targetDate)}</td><td><button class="tonal-button" data-retry-job="${item.jobId}">重试</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("暂无投递任务", "测试简报或定时任务会显示在这里。")}</section></div></div>`;
-  document.getElementById("mailboxForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.smtpPort = Number(data.smtpPort); data.dailyQuota = Number(data.dailyQuota); data.enabled = 1; try { await api("/api/v1/admin/mailboxes", { method: "POST", body: JSON.stringify(data) }); toast("邮箱已加入池中"); renderMail(); } catch (error) { toast(error.message, "error"); } });
+  document.getElementById("mailboxForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.smtpPort = Number(data.smtpPort); data.dailyQuota = Number(data.dailyQuota); data.enabled = 1; const id = event.currentTarget.dataset.editingId; try { await api(id ? `/api/v1/admin/mailboxes/${id}` : "/api/v1/admin/mailboxes", { method: id ? "PUT" : "POST", body: JSON.stringify(data) }); toast(id ? "邮箱信息已更新" : "邮箱已加入池中"); renderMail(); } catch (error) { toast(error.message, "error"); } });
+  document.querySelectorAll("[data-edit-mailbox]").forEach((button) => button.addEventListener("click", () => {
+    const item = mailboxes.mailboxes.find((mailbox) => mailbox.mailboxId === button.dataset.editMailbox); if (!item) return;
+    const form = document.getElementById("mailboxForm"); form.dataset.editingId = item.mailboxId;
+    ["name", "fromAddress", "smtpHost", "smtpPort", "username", "passwordSecretRef", "dailyQuota"].forEach((key) => { form.elements[key].value = item[key] ?? ""; });
+    form.querySelector("button[type='submit'], button.primary-button").textContent = "保存修改"; form.scrollIntoView({ behavior: "smooth" });
+  }));
+  document.querySelectorAll("[data-delete-mailbox]").forEach((button) => button.addEventListener("click", async () => {
+    if (!confirm("确定删除该 SMTP 邮箱？")) return;
+    try { await api(`/api/v1/admin/mailboxes/${button.dataset.deleteMailbox}`, { method: "DELETE" }); toast("邮箱已删除"); renderMail(); } catch (error) { toast(error.message, "error"); }
+  }));
   document.querySelectorAll("[data-retry-job]").forEach((button) => button.addEventListener("click", async () => { try { await api(`/api/v1/admin/briefing-jobs/${button.dataset.retryJob}/retry`, { method: "POST", body: "{}" }); toast("任务已重新排队"); renderMail(); } catch (error) { toast(error.message, "error"); } }));
 }
 
@@ -423,17 +488,87 @@ function auditTable(items) {
   return `<div class="table-wrap"><table class="data-table"><thead><tr><th>时间</th><th>主体</th><th>动作</th><th>对象</th><th>请求</th></tr></thead><tbody>${items.map((item) => `<tr><td>${formatDate(item.createdAt, true)}</td><td>${escapeHTML(item.actorId || "SYSTEM")}</td><td><strong>${escapeHTML(item.action)}</strong></td><td>${escapeHTML(item.targetType)}<br><small>${escapeHTML(item.targetId)}</small></td><td><code>${escapeHTML(item.requestId)}</code></td></tr>`).join("")}</tbody></table></div>`;
 }
 
+function readMobileSettings(document) {
+  const values = {};
+  const records = document?.records?.["mobile.settings"] || [];
+  records.filter((item) => !item.deletedAt && item.payload).forEach((item) => {
+    try { values[item.id] = JSON.parse(item.payload).value; } catch { /* ignore malformed record */ }
+  });
+  return values;
+}
+
+async function fetchCloudDocument(retry = true) {
+  const headers = { Authorization: `Bearer ${state.session.accessToken}`, Accept: "application/json" };
+  const response = await fetch("/api/v1/cloud/official/document", { headers });
+  if (response.status === 401 && retry && await refreshSession()) return fetchCloudDocument(false);
+  const text = await response.text();
+  if (!response.ok) {
+    let body = {}; try { body = JSON.parse(text); } catch { body.message = text; }
+    const error = new Error(body.message || `HTTP ${response.status}`); error.status = response.status; throw error;
+  }
+  return { document: text ? JSON.parse(text) : {}, etag: response.headers.get("ETag") || '"0"' };
+}
+
+async function saveMobileSettings(document, etag, values) {
+  const now = Date.now();
+  const deviceId = `web-${String(state.account.userId || "account").slice(-12)}`;
+  document.format = "classing_cloud_sync_v2";
+  document.records ||= {};
+  const records = document.records["mobile.settings"] ||= [];
+  document.devices ||= [];
+  document.changes ||= [];
+  const device = document.devices.find((item) => item.deviceId === deviceId) || { deviceId, lastCounter: 0, lastChangedAt: 0 };
+  let counter = Math.max(device.lastCounter || 0, ...document.devices.map((item) => Number(item.lastCounter || 0)));
+  Object.entries(values).forEach(([id, value]) => {
+    counter += 1;
+    const record = { id, payload: JSON.stringify({ value }), version: { counter, deviceId, changedAt: now }, deletedAt: null, recoverableUntil: null };
+    const index = records.findIndex((item) => item.id === id);
+    if (index >= 0) records[index] = record; else records.push(record);
+    document.changes.unshift({ id: `chg-web-${now}-${counter}`, domain: "mobile.settings", recordId: id, action: "updated", version: record.version, occurredAt: now, detail: "web settings" });
+  });
+  device.lastCounter = counter; device.lastChangedAt = now;
+  const deviceIndex = document.devices.findIndex((item) => item.deviceId === deviceId);
+  if (deviceIndex >= 0) document.devices[deviceIndex] = device; else document.devices.push(device);
+  document.changes = document.changes.slice(0, 100);
+  document.updatedAt = now;
+  const response = await fetch("/api/v1/cloud/official/document", { method: "PUT", headers: { Authorization: `Bearer ${state.session.accessToken}`, "Content-Type": "application/json", "If-Match": etag }, body: JSON.stringify(document) });
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message || `HTTP ${response.status}`); }
+}
+
+async function startSettingsStream(version) {
+  state.settingsStreamAbort?.abort();
+  const controller = new AbortController(); state.settingsStreamAbort = controller;
+  try {
+    const response = await fetch("/api/v1/cloud/official/events", { headers: { Authorization: `Bearer ${state.session.accessToken}`, "Last-Event-ID": String(version || 0) }, signal: controller.signal });
+    if (!response.ok || !response.body) return;
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+    while (state.view === "settings") {
+      const { value, done } = await reader.read(); if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("event: settings") && buffer.includes("\n\n")) {
+        buffer = ""; await renderSettings(); return;
+      }
+      if (buffer.length > 8192) buffer = buffer.slice(-4096);
+    }
+  } catch (error) { if (error.name !== "AbortError") setTimeout(() => state.view === "settings" && startSettingsStream(version), 3000); }
+}
+
 async function renderSettings() {
   const settings = isAdmin() ? await api("/api/v1/admin/settings") : { settings: {} };
+  let cloud = null; let mobileSettings = {}; let cloudError = "";
+  try { cloud = await fetchCloudDocument(); mobileSettings = readMobileSettings(cloud.document); } catch (error) { cloudError = error.message; }
   setFab("编辑设置");
   content.innerHTML = `<div class="runtime-page">${hero("settings", `<div class="hero-stat"><strong>${escapeHTML(state.account.role)}</strong><span>${escapeHTML(state.account.status)}</span></div>`)}<div class="runtime-grid">
     <section class="runtime-panel half"><div class="runtime-panel-header"><h2>个人资料</h2><span class="status-pill">${escapeHTML(state.account.role)}</span></div><form class="runtime-form" id="profileForm"><label class="form-field full"><span>用户名</span><input name="username" value="${escapeHTML(state.account.username)}" required minlength="3" maxlength="40"></label><label class="form-field full"><span>邮箱</span><input name="email" type="email" value="${escapeHTML(state.account.email)}" required></label><div class="runtime-actions full"><button class="primary-button">保存资料</button></div></form></section>
     <section class="runtime-panel half"><div class="runtime-panel-header"><h2>修改密码</h2><span class="status-pill warn">将撤销全部会话</span></div><form class="runtime-form" id="passwordForm"><input type="text" name="username" autocomplete="username" value="${escapeHTML(state.account.username)}" hidden><label class="form-field full"><span>当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" required></label><label class="form-field full"><span>新密码</span><input name="newPassword" type="password" autocomplete="new-password" minlength="8" required></label><label class="form-field full"><span>确认新密码</span><input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required></label><div class="runtime-actions full"><button class="primary-button">更新密码</button></div></form></section>
+    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>客户端设置同步</h2><span class="status-pill">${cloud ? "实时连接" : "不可用"}</span></div>${cloud ? `<form class="runtime-form" id="clientSettingsForm"><label class="form-field"><span>显示周末</span><select name="showWeekend"><option value="true" ${mobileSettings.showWeekend !== false ? "selected" : ""}>显示</option><option value="false" ${mobileSettings.showWeekend === false ? "selected" : ""}>隐藏</option></select></label><label class="form-field"><span>周数计算</span><select name="weekNumberMode"><option value="NATURAL" ${mobileSettings.weekNumberMode !== "SEMESTER" ? "selected" : ""}>自然周</option><option value="SEMESTER" ${mobileSettings.weekNumberMode === "SEMESTER" ? "selected" : ""}>学期周</option></select></label><label class="form-field"><span>新学期开始日期</span><input name="semesterWeekStartDate" type="date" value="${escapeHTML(mobileSettings.semesterWeekStartDate || "")}"></label><label class="form-field"><span>提醒</span><select name="reminderEnabled"><option value="true" ${mobileSettings.reminderEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.reminderEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>提前提醒（分钟）</span><input name="reminderMinutes" type="number" min="5" max="60" value="${Number(mobileSettings.reminderMinutes || 15)}"></label><label class="form-field"><span>保活级别</span><select name="keepAliveLevel"><option ${mobileSettings.keepAliveLevel === "ECO" ? "selected" : ""}>ECO</option><option ${mobileSettings.keepAliveLevel !== "ECO" && mobileSettings.keepAliveLevel !== "AGGRESSIVE" ? "selected" : ""}>BALANCED</option><option ${mobileSettings.keepAliveLevel === "AGGRESSIVE" ? "selected" : ""}>AGGRESSIVE</option></select></label><label class="form-field"><span>每日简报</span><select name="dailyBriefingEnabled"><option value="true" ${mobileSettings.dailyBriefingEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.dailyBriefingEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>简报时间</span><input name="dailyBriefingTime" type="time" value="${escapeHTML(mobileSettings.dailyBriefingTime || "20:00")}"></label><div class="runtime-actions full"><button class="primary-button">保存并同步</button><span>变更会实时通知 Web，并在客户端下次官方云同步时合并。</span></div></form>` : `<div class="empty-state"><strong>设置同步不可用</strong><span>${escapeHTML(cloudError)}</span></div>`}</section>
     ${isAdmin() ? `<section class="runtime-panel full"><div class="runtime-panel-header"><h2>系统运行设置</h2><span class="status-pill">管理员</span></div><form class="runtime-form" id="systemSettingsForm"><label class="form-field"><span>开放注册</span><select name="registration.enabled"><option value="true" ${settings.settings["registration.enabled"] !== "false" ? "selected" : ""}>启用</option><option value="false" ${settings.settings["registration.enabled"] === "false" ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>简报服务</span><select name="briefing.enabled"><option value="true" ${settings.settings["briefing.enabled"] !== "false" ? "selected" : ""}>启用</option><option value="false" ${settings.settings["briefing.enabled"] === "false" ? "selected" : ""}>关闭</option></select></label><label class="form-field full"><span>维护公告</span><textarea name="maintenance.message" placeholder="留空表示无公告">${escapeHTML(settings.settings["maintenance.message"] || "")}</textarea></label><div class="runtime-actions full"><button class="primary-button">保存系统设置</button></div></form></section>` : ""}
   </div></div>`;
   document.getElementById("profileForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { state.account = (await api("/api/v1/account/me", { method: "PATCH", body: JSON.stringify(data) })).account; syncAccountChrome(); toast("个人资料已更新"); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("passwordForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); if (data.newPassword !== data.confirmPassword) { toast("两次输入的新密码不一致", "error"); return; } try { await api("/api/v1/account/password", { method: "PUT", body: JSON.stringify({ currentPassword: data.currentPassword, newPassword: data.newPassword }) }); toast("密码已更新，请重新登录"); setTimeout(() => signOut(false), 900); } catch (error) { toast(error.message, "error"); } });
+  document.getElementById("clientSettingsForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); const values = { showWeekend: data.showWeekend === "true", weekNumberMode: data.weekNumberMode, semesterWeekStartDate: data.semesterWeekStartDate, reminderEnabled: data.reminderEnabled === "true", reminderMinutes: Number(data.reminderMinutes), keepAliveLevel: data.keepAliveLevel, dailyBriefingEnabled: data.dailyBriefingEnabled === "true", dailyBriefingTime: data.dailyBriefingTime }; try { await saveMobileSettings(cloud.document, cloud.etag, values); toast("客户端设置已同步"); await renderSettings(); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("systemSettingsForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { await api("/api/v1/admin/settings", { method: "PUT", body: JSON.stringify({ settings: data }) }); toast("系统设置已更新"); } catch (error) { toast(error.message, "error"); } });
+  if (cloud) startSettingsStream(Number(String(cloud.etag).replace(/\D/g, "")) || 0);
 }
 
 boot();

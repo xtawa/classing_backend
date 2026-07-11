@@ -26,7 +26,11 @@ func (s *Server) adminListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	users := make([]map[string]any, 0, len(items))
 	for _, item := range items {
-		users = append(users, accountPayload(item))
+		payload := accountPayload(item)
+		if membership, membershipErr := s.store.Membership(r.Context(), item.ID); membershipErr == nil {
+			payload["membership"] = membershipPayload(membership)
+		}
+		users = append(users, payload)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": users, "total": total})
 }
@@ -157,6 +161,21 @@ func (s *Server) adminCreateMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, principal(r).User.ID, "MAILBOX_CREATE", "MAILBOX", item.ID, map[string]any{"host": item.SMTPHost, "secretRef": item.PasswordSecretRef})
 	writeJSON(w, http.StatusCreated, map[string]any{"mailbox": item})
+}
+
+func (s *Server) adminUpdateMailbox(w http.ResponseWriter, r *http.Request) {
+	var body model.Mailbox
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.ID = r.PathValue("id")
+	item, err := s.store.UpdateMailbox(r.Context(), body)
+	if err != nil {
+		writeStoreError(w, r, err, "MAILBOX")
+		return
+	}
+	s.audit(r, principal(r).User.ID, "MAILBOX_UPDATE", "MAILBOX", item.ID, map[string]any{"host": item.SMTPHost, "secretRef": item.PasswordSecretRef})
+	writeJSON(w, http.StatusOK, map[string]any{"mailbox": item})
 }
 
 func (s *Server) adminDeleteMailbox(w http.ResponseWriter, r *http.Request) {

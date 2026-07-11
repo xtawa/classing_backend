@@ -57,6 +57,11 @@
 ### `GET /api/v1/cloud/official/config`
 - 可选接口，返回服务端下发的限制、限流策略、最大文档大小等。
 
+### `GET /api/v1/cloud/official/events`
+- 带 Bearer token 的 SSE 事件流。
+- `Last-Event-ID` 使用已知云文档版本。
+- 云文档版本变化时发送 `settings` 事件，Web 收到后重新拉取并合并设置。
+
 ## 5. 幂等与并发
 - 每次写入必须带 `Idempotency-Key`。
 - 服务端保存最近一段时间的 key，避免客户端重试重复提交。

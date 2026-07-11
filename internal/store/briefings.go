@@ -186,6 +186,21 @@ func (s *Store) QueuePasswordResetJob(ctx context.Context, userID, token string,
 	return item, normalizeDBError(err)
 }
 
+func (s *Store) QueueEmailVerificationJob(ctx context.Context, userID, code string, expiresAt int64) (model.BriefingJob, error) {
+	payload, err := json.Marshal(map[string]any{"code": code, "expiresAt": expiresAt})
+	if err != nil {
+		return model.BriefingJob{}, err
+	}
+	now := nowMillis()
+	item := model.BriefingJob{
+		ID: ids.New("job"), UserID: userID, Channel: "EMAIL_VERIFICATION", Status: "PENDING",
+		ScheduledAt: now, CreatedAt: now, UpdatedAt: now, Payload: string(payload),
+	}
+	item.TargetDate = item.ID
+	_, err = s.db.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at, payload) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`), item.ID, item.UserID, item.TargetDate, item.Channel, item.ScheduledAt, item.CreatedAt, item.UpdatedAt, item.Payload)
+	return item, normalizeDBError(err)
+}
+
 func (s *Store) ListBriefingJobs(ctx context.Context, limit, offset int) ([]model.BriefingJob, int, error) {
 	var total int
 	if err := s.db.GetContext(ctx, &total, `SELECT COUNT(*) FROM briefing_jobs`); err != nil {
@@ -225,6 +240,25 @@ func (s *Store) CreateMailbox(ctx context.Context, item model.Mailbox) (model.Ma
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO mailboxes (id, name, smtp_host, smtp_port, username, password_secret_ref, from_address, daily_quota, used_today, usage_date, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?)`), item.ID, item.Name, item.SMTPHost, item.SMTPPort, item.Username, item.PasswordSecretRef, item.FromAddress, item.DailyQuota, item.Enabled, item.CreatedAt, item.UpdatedAt)
 	return item, normalizeDBError(err)
+}
+
+func (s *Store) UpdateMailbox(ctx context.Context, item model.Mailbox) (model.Mailbox, error) {
+	if item.ID == "" || item.SMTPHost == "" || item.SMTPPort < 1 || item.DailyQuota < 1 || !strings.HasPrefix(item.PasswordSecretRef, "env:") {
+		return model.Mailbox{}, ErrInvalid
+	}
+	if item.Enabled != 0 {
+		item.Enabled = 1
+	}
+	result, err := s.db.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET name = ?, smtp_host = ?, smtp_port = ?, username = ?, password_secret_ref = ?, from_address = ?, daily_quota = ?, enabled = ?, updated_at = ? WHERE id = ?`), item.Name, item.SMTPHost, item.SMTPPort, item.Username, item.PasswordSecretRef, item.FromAddress, item.DailyQuota, item.Enabled, nowMillis(), item.ID)
+	if err != nil {
+		return model.Mailbox{}, normalizeDBError(err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return model.Mailbox{}, ErrNotFound
+	}
+	var updated model.Mailbox
+	err = s.db.GetContext(ctx, &updated, s.rebind(`SELECT * FROM mailboxes WHERE id = ?`), item.ID)
+	return updated, normalizeDBError(err)
 }
 
 func (s *Store) DeleteMailbox(ctx context.Context, id string) error {

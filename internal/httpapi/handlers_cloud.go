@@ -103,3 +103,47 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
+
+func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.requireCloudMembership(w, r) {
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, http.StatusNotImplemented, "OFFICIAL_CLOUD_EVENTS_UNAVAILABLE", "streaming is unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	lastVersion := parseVersion(r.Header.Get("Last-Event-ID"))
+	ticker := time.NewTicker(time.Second)
+	keepAlive := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	defer keepAlive.Stop()
+	userID := principal(r).User.ID
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepAlive.C:
+			_, _ = io.WriteString(w, ": keep-alive\n\n")
+			flusher.Flush()
+		case <-ticker.C:
+			item, err := s.store.CloudDocument(r.Context(), userID)
+			if err == store.ErrNotFound {
+				continue
+			}
+			if err != nil {
+				return
+			}
+			if item.Version <= lastVersion {
+				continue
+			}
+			lastVersion = item.Version
+			_, _ = io.WriteString(w, "id: "+strconv.FormatInt(item.Version, 10)+"\nevent: settings\ndata: {\"version\":"+strconv.FormatInt(item.Version, 10)+",\"updatedAt\":"+strconv.FormatInt(item.UpdatedAt, 10)+"}\n\n")
+			flusher.Flush()
+		}
+	}
+}

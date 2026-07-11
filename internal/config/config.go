@@ -19,11 +19,15 @@ type Config struct {
 	AccessTokenTTL         time.Duration
 	RefreshTokenTTL        time.Duration
 	ResetTokenTTL          time.Duration
+	EmailVerificationTTL   time.Duration
 	AllowedOrigins         []string
 	BootstrapAdminUser     string
 	BootstrapAdminEmail    string
 	BootstrapAdminPass     string
 	ExposeResetToken       bool
+	ExposeVerificationCode bool
+	TurnstileSiteKey       string
+	TurnstileSecret        string
 	MaxCloudDocumentSize   int64
 	PublicBaseURL          string
 	SchedulerEnabled       bool
@@ -39,11 +43,15 @@ func Load() (Config, error) {
 		AccessTokenTTL:         duration("ACCESS_TOKEN_TTL", 15*time.Minute),
 		RefreshTokenTTL:        duration("REFRESH_TOKEN_TTL", 30*24*time.Hour),
 		ResetTokenTTL:          duration("RESET_TOKEN_TTL", 30*time.Minute),
+		EmailVerificationTTL:   duration("EMAIL_VERIFICATION_TTL", 10*time.Minute),
 		AllowedOrigins:         csv("CORS_ALLOWED_ORIGINS"),
 		BootstrapAdminUser:     env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
 		BootstrapAdminEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
 		BootstrapAdminPass:     os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
 		ExposeResetToken:       boolean("EXPOSE_RESET_TOKEN", false),
+		ExposeVerificationCode: boolean("EXPOSE_VERIFICATION_CODE", false),
+		TurnstileSiteKey:       strings.TrimSpace(os.Getenv("TURNSTILE_SITE_KEY")),
+		TurnstileSecret:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET")),
 		MaxCloudDocumentSize:   int64(integer("MAX_CLOUD_DOCUMENT_BYTES", 2*1024*1024)),
 		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 		SchedulerEnabled:       boolean("SCHEDULER_ENABLED", true),
@@ -77,6 +85,12 @@ func Load() (Config, error) {
 
 	if cfg.Environment == "production" && cfg.BootstrapAdminEmail != "" && len(cfg.BootstrapAdminPass) < 12 {
 		return Config{}, errors.New("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters in production")
+	}
+	if (cfg.TurnstileSiteKey == "") != (cfg.TurnstileSecret == "") {
+		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET must be configured together")
+	}
+	if cfg.Environment == "production" && cfg.TurnstileSecret == "" {
+		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required in production")
 	}
 	return cfg, nil
 }

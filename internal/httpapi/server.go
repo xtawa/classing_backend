@@ -12,16 +12,17 @@ import (
 )
 
 type Server struct {
-	cfg     config.Config
-	store   *store.Store
-	tokens  *auth.Manager
-	web     fs.FS
-	log     *slog.Logger
-	limiter *rateLimiter
+	cfg           config.Config
+	store         *store.Store
+	tokens        *auth.Manager
+	web           fs.FS
+	log           *slog.Logger
+	limiter       *rateLimiter
+	publicLimiter *rateLimiter
 }
 
 func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *Server {
-	return &Server{cfg: cfg, store: data, tokens: auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL), web: web, log: logger, limiter: newRateLimiter(20, time.Minute)}
+	return &Server{cfg: cfg, store: data, tokens: auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL), web: web, log: logger, limiter: newRateLimiter(20, time.Minute), publicLimiter: newRateLimiter(3, time.Minute)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -29,11 +30,14 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
-	mux.HandleFunc("GET /api/v1/client/announcements", s.publicAnnouncements)
-	mux.HandleFunc("GET /api/v1/client/releases/latest", s.publicLatestRelease)
+	mux.Handle("GET /api/v1/client/announcements", s.publicClientRateLimit(http.HandlerFunc(s.publicAnnouncements)))
+	mux.Handle("GET /api/v1/client/releases/latest", s.publicClientRateLimit(http.HandlerFunc(s.publicLatestRelease)))
 	mux.HandleFunc("GET /api/v1/client/releases/{id}/download", s.publicDownloadRelease)
 
 	mux.Handle("POST /api/v1/auth/register", s.authRateLimit(http.HandlerFunc(s.register)))
+	mux.HandleFunc("GET /api/v1/auth/registration/config", s.registrationConfig)
+	mux.Handle("POST /api/v1/auth/register/email/request", s.authRateLimit(http.HandlerFunc(s.requestRegistrationEmail)))
+	mux.Handle("POST /api/v1/auth/register/email/confirm", s.authRateLimit(http.HandlerFunc(s.confirmRegistrationEmail)))
 	mux.Handle("POST /api/v1/auth/login", s.authRateLimit(http.HandlerFunc(s.login)))
 	mux.Handle("POST /api/v1/auth/refresh", s.authRateLimit(http.HandlerFunc(s.refresh)))
 	mux.Handle("POST /api/v1/auth/password/reset/request", s.authRateLimit(http.HandlerFunc(s.requestPasswordReset)))
@@ -58,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/cloud/official/config", s.requireAuth(http.HandlerFunc(s.cloudConfig)))
 	mux.Handle("GET /api/v1/cloud/official/document", s.requireAuth(http.HandlerFunc(s.getCloudDocument)))
 	mux.Handle("PUT /api/v1/cloud/official/document", s.requireAuth(http.HandlerFunc(s.putCloudDocument)))
+	mux.Handle("GET /api/v1/cloud/official/events", s.requireAuth(http.HandlerFunc(s.cloudEvents)))
 
 	mux.Handle("GET /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.getBriefing)))
 	mux.Handle("PUT /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.putBriefing)))
@@ -74,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/admin/membership/revoke", s.requireAdmin(http.HandlerFunc(s.adminRevokeMembership)))
 	mux.Handle("GET /api/v1/admin/mailboxes", s.requireAdmin(http.HandlerFunc(s.adminListMailboxes)))
 	mux.Handle("POST /api/v1/admin/mailboxes", s.requireAdmin(http.HandlerFunc(s.adminCreateMailbox)))
+	mux.Handle("PUT /api/v1/admin/mailboxes/{id}", s.requireAdmin(http.HandlerFunc(s.adminUpdateMailbox)))
 	mux.Handle("DELETE /api/v1/admin/mailboxes/{id}", s.requireAdmin(http.HandlerFunc(s.adminDeleteMailbox)))
 	mux.Handle("GET /api/v1/admin/briefing-jobs", s.requireAdmin(http.HandlerFunc(s.adminListJobs)))
 	mux.Handle("POST /api/v1/admin/briefing-jobs/{id}/retry", s.requireAdmin(http.HandlerFunc(s.adminRetryJob)))

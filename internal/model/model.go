@@ -130,6 +130,7 @@ const (
 
 	StatusActive   = "ACTIVE"
 	StatusDisabled = "DISABLED"
+	StatusPending  = "PENDING_VERIFICATION"
 
 	ReleaseStatusDraft     = "DRAFT"
 	ReleaseStatusPublished = "PUBLISHED"

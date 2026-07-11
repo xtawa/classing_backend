@@ -185,6 +185,19 @@ func mailContent(job store.ClaimedJob) (string, string, error) {
 			payload.Token,
 			expires,
 		), nil
+	case "EMAIL_VERIFICATION":
+		var payload struct {
+			Code      string `json:"code"`
+			ExpiresAt int64  `json:"expiresAt"`
+		}
+		if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil || payload.Code == "" {
+			return "", "", fmt.Errorf("invalid email verification payload")
+		}
+		expires := time.UnixMilli(payload.ExpiresAt).Format("2006-01-02 15:04:05 MST")
+		return "Classing email verification", fmt.Sprintf(
+			"Hello %s,\r\n\r\nYour Classing verification code is:\r\n\r\n%s\r\n\r\nThe code expires at %s. If you did not request this account, ignore this email.\r\n",
+			job.Username, payload.Code, expires,
+		), nil
 	default:
 		return "", "", fmt.Errorf("unsupported mail job channel %s", job.Channel)
 	}

@@ -36,6 +36,98 @@ func (s *Store) CreateUser(ctx context.Context, username, email, passwordHash, r
 	return user, nil
 }
 
+func (s *Store) CreateOrRefreshPendingUser(ctx context.Context, username, email, passwordHash string) (model.User, error) {
+	username = strings.TrimSpace(username)
+	email = strings.ToLower(strings.TrimSpace(email))
+	for _, identifier := range []string{email, username} {
+		existing, err := s.UserByIdentifier(ctx, identifier)
+		if err == nil {
+			if existing.Status != model.StatusPending || !strings.EqualFold(existing.Email, email) || !strings.EqualFold(existing.Username, username) {
+				return model.User{}, ErrConflict
+			}
+			now := nowMillis()
+			_, err = s.db.ExecContext(ctx, s.rebind(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND status = ?`), passwordHash, now, existing.ID, model.StatusPending)
+			if err != nil {
+				return model.User{}, normalizeDBError(err)
+			}
+			return s.UserByID(ctx, existing.ID)
+		}
+		if err != ErrNotFound {
+			return model.User{}, err
+		}
+	}
+	now := nowMillis()
+	user := model.User{
+		ID: ids.New("usr"), Username: username, Email: email, PasswordHash: passwordHash,
+		Role: model.RoleUser, Status: model.StatusPending, CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO users (id, username, email, password_hash, role, status, email_verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`), user.ID, user.Username, user.Email, user.PasswordHash, user.Role, user.Status, now, now)
+	if err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	_, _ = s.db.ExecContext(ctx, s.rebind(`INSERT INTO memberships (user_id, tier, expires_at, updated_at, source) VALUES (?, 'FREE', 0, ?, 'SYSTEM')`), user.ID, now)
+	return user, nil
+}
+
+func (s *Store) CreateEmailVerificationChallenge(ctx context.Context, userID, codeHash string, expiresAt int64, ip, ua string) (string, error) {
+	id := ids.New("evc")
+	now := nowMillis()
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var lastCreated int64
+	_ = tx.GetContext(ctx, &lastCreated, s.rebind(`SELECT COALESCE(MAX(created_at), 0) FROM email_verification_challenges WHERE user_id = ?`), userID)
+	if lastCreated > 0 && now-lastCreated < 60_000 {
+		return "", ErrUnavailable
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_verification_challenges SET used_at = ? WHERE user_id = ? AND used_at = 0`), now, userID); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO email_verification_challenges (id, user_id, code_hash, expires_at, request_ip, request_ua, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`), id, userID, codeHash, expiresAt, ip, ua, now); err != nil {
+		return "", normalizeDBError(err)
+	}
+	return id, tx.Commit()
+}
+
+func (s *Store) ConsumeEmailVerificationChallenge(ctx context.Context, challengeID, codeHash string) (model.User, error) {
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return model.User{}, err
+	}
+	defer tx.Rollback()
+	var row struct {
+		ID        string `db:"id"`
+		UserID    string `db:"user_id"`
+		CodeHash  string `db:"code_hash"`
+		ExpiresAt int64  `db:"expires_at"`
+		UsedAt    int64  `db:"used_at"`
+	}
+	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, code_hash, expires_at, used_at FROM email_verification_challenges WHERE id = ?`), challengeID); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	now := nowMillis()
+	if row.UsedAt != 0 || row.ExpiresAt <= now || row.CodeHash != codeHash {
+		return model.User{}, ErrForbidden
+	}
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_verification_challenges SET used_at = ? WHERE id = ? AND used_at = 0`), now, row.ID)
+	if err != nil {
+		return model.User{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return model.User{}, ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET status = ?, email_verified = 1, updated_at = ? WHERE id = ? AND status = ?`), model.StatusActive, now, row.UserID, model.StatusPending); err != nil {
+		return model.User{}, err
+	}
+	var user model.User
+	if err := tx.GetContext(ctx, &user, s.rebind(`SELECT * FROM users WHERE id = ?`), row.UserID); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	return user, tx.Commit()
+}
+
 func (s *Store) BootstrapAdmin(ctx context.Context, username, email, password string) (bool, error) {
 	if strings.TrimSpace(email) == "" || password == "" {
 		return false, nil

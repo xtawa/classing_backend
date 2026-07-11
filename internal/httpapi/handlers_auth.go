@@ -1,10 +1,14 @@
 package httpapi
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -18,19 +22,40 @@ import (
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,40}$`)
 
 type authRequest struct {
-	Username   string `json:"username"`
-	Email      string `json:"email"`
-	Identifier string `json:"identifier"`
-	Password   string `json:"password"`
+	Username       string `json:"username"`
+	Email          string `json:"email"`
+	Identifier     string `json:"identifier"`
+	Password       string `json:"password"`
+	TurnstileToken string `json:"turnstileToken"`
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, http.StatusConflict, "AUTH_EMAIL_VERIFICATION_REQUIRED", "use the email verification registration flow")
+}
+
+func (s *Server) registrationConfig(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"turnstileRequired":         s.cfg.TurnstileSecret != "",
+		"turnstileSiteKey":          s.cfg.TurnstileSiteKey,
+		"emailVerificationRequired": true,
+	})
+}
+
+func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request) {
 	if enabled, err := s.store.Setting(r.Context(), "registration.enabled", "true"); err != nil || enabled == "false" {
 		writeError(w, r, http.StatusForbidden, "AUTH_REGISTRATION_DISABLED", "new account registration is disabled")
 		return
 	}
 	var body authRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if ok, err := s.verifyTurnstile(r, body.TurnstileToken); err != nil {
+		s.log.Error("turnstile verification", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusServiceUnavailable, "AUTH_TURNSTILE_UNAVAILABLE", "human verification is temporarily unavailable")
+		return
+	} else if !ok {
+		writeError(w, r, http.StatusBadRequest, "AUTH_TURNSTILE_INVALID", "human verification failed")
 		return
 	}
 	body.Username = strings.TrimSpace(body.Username)
@@ -48,7 +73,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "AUTH_PASSWORD_WEAK", err.Error())
 		return
 	}
-	user, err := s.store.CreateUser(r.Context(), body.Username, body.Email, hash, model.RoleUser)
+	user, err := s.store.CreateOrRefreshPendingUser(r.Context(), body.Username, body.Email, hash)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, r, http.StatusConflict, "AUTH_ACCOUNT_EXISTS", "username or email already exists")
@@ -57,8 +82,85 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "AUTH_REGISTER")
 		return
 	}
+	code, err := numericVerificationCode()
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "AUTH_VERIFICATION_FAILED", "could not create verification code")
+		return
+	}
+	expiresAt := time.Now().Add(s.cfg.EmailVerificationTTL).UnixMilli()
+	challengeID, err := s.store.CreateEmailVerificationChallenge(r.Context(), user.ID, auth.HashOpaqueToken(code), expiresAt, clientIP(r), r.UserAgent())
+	if err != nil {
+		if errors.Is(err, store.ErrUnavailable) {
+			w.Header().Set("Retry-After", "60")
+			writeError(w, r, http.StatusTooManyRequests, "AUTH_RATE_LIMITED", "wait before requesting another verification code")
+			return
+		}
+		writeStoreError(w, r, err, "AUTH_EMAIL_VERIFICATION")
+		return
+	}
+	if _, err := s.store.QueueEmailVerificationJob(r.Context(), user.ID, code, expiresAt); err != nil {
+		s.log.Error("queue registration verification email", "user_id", user.ID, "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusServiceUnavailable, "AUTH_EMAIL_DELIVERY_FAILED", "verification email could not be queued")
+		return
+	}
+	s.audit(r, user.ID, "AUTH_EMAIL_VERIFICATION_REQUEST", "USER", user.ID, map[string]any{"email": user.Email})
+	response := map[string]any{"challenge": map[string]any{"challengeId": challengeID, "expiresAt": expiresAt, "resendAfterSeconds": 60}}
+	if s.cfg.ExposeVerificationCode && s.cfg.Environment != "production" {
+		response["devVerificationCode"] = code
+	}
+	writeJSON(w, http.StatusAccepted, response)
+}
+
+func (s *Server) confirmRegistrationEmail(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ChallengeID      string `json:"challengeId"`
+		VerificationCode string `json:"verificationCode"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	user, err := s.store.ConsumeEmailVerificationChallenge(r.Context(), strings.TrimSpace(body.ChallengeID), auth.HashOpaqueToken(strings.TrimSpace(body.VerificationCode)))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "AUTH_EMAIL_VERIFICATION_INVALID", "verification code is invalid, expired or already used")
+		return
+	}
 	s.audit(r, user.ID, "AUTH_REGISTER", "USER", user.ID, map[string]any{"email": user.Email})
 	s.writeSession(w, r, user, http.StatusCreated)
+}
+
+func numericVerificationCode() (string, error) {
+	value, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", value.Int64()), nil
+}
+
+func (s *Server) verifyTurnstile(r *http.Request, token string) (bool, error) {
+	if s.cfg.TurnstileSecret == "" {
+		return true, nil
+	}
+	if strings.TrimSpace(token) == "" {
+		return false, nil
+	}
+	form := url.Values{
+		"secret":   {s.cfg.TurnstileSecret},
+		"response": {strings.TrimSpace(token)},
+		"remoteip": {clientIP(r)},
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	response, err := client.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify", form)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	var result struct {
+		Success bool `json:"success"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return response.StatusCode == http.StatusOK && result.Success, nil
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {

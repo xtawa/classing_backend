@@ -99,6 +99,12 @@ SCHEDULER_ENABLED=true
 
 # 在管理台添加 SMTP 邮箱时使用 env:CLASSING_SMTP_PASSWORD。
 CLASSING_SMTP_PASSWORD=替换为SMTP密码或应用专用密码
+
+# Cloudflare Turnstile（生产环境必须成对配置）
+TURNSTILE_SITE_KEY=替换为站点密钥
+TURNSTILE_SECRET=替换为服务端密钥
+EMAIL_VERIFICATION_TTL=10m
+EXPOSE_VERIFICATION_CODE=false
 ```
 
 注意：
@@ -282,6 +288,10 @@ BOOTSTRAP_ADMIN_USERNAME=admin
 BOOTSTRAP_ADMIN_EMAIL=管理员邮箱
 BOOTSTRAP_ADMIN_PASSWORD=首次启动管理员密码
 EXPOSE_RESET_TOKEN=false
+EXPOSE_VERIFICATION_CODE=false
+TURNSTILE_SITE_KEY=替换为站点密钥
+TURNSTILE_SECRET=替换为服务端密钥
+EMAIL_VERIFICATION_TTL=10m
 SCHEDULER_ENABLED=true
 ```
 
@@ -512,6 +522,8 @@ GET /api/v1/membership/status
 - [ ] `JWT_SECRET` 至少 32 个随机字节，且未提交到 Git。
 - [ ] `.env` 或环境文件权限为 600/640。
 - [ ] `EXPOSE_RESET_TOKEN=false`。
+- [ ] `EXPOSE_VERIFICATION_CODE=false`。
+- [ ] `TURNSTILE_SITE_KEY` 与 `TURNSTILE_SECRET` 已使用生产站点凭据成对配置。
 - [ ] PostgreSQL 5432 未暴露公网。
 - [ ] 仅通过 HTTPS 对外提供服务。
 - [ ] 管理员密码已从 bootstrap 初始值修改。

@@ -40,6 +40,7 @@ Authorization: Bearer <accessToken>
 - `POST /api/v1/admin/membership/revoke`
 - `GET /api/v1/admin/mailboxes`
 - `POST /api/v1/admin/mailboxes`
+- `PUT /api/v1/admin/mailboxes/{id}`
 - `DELETE /api/v1/admin/mailboxes/{id}`
 - `GET /api/v1/admin/briefing-jobs`
 - `POST /api/v1/admin/briefing-jobs/{id}/retry`
@@ -61,4 +62,3 @@ Authorization: Bearer <accessToken>
   "requestId": "req_..."
 }
 ```
-
