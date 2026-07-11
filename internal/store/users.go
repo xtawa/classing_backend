@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
@@ -158,9 +157,9 @@ func (s *Store) UserByID(ctx context.Context, id string) (model.User, error) {
 	return user, normalizeDBError(err)
 }
 
-func (s *Store) UpdateProfile(ctx context.Context, id, username, email string) (model.User, error) {
+func (s *Store) UpdateUsername(ctx context.Context, id, username string) (model.User, error) {
 	now := nowMillis()
-	result, err := s.db.ExecContext(ctx, s.rebind(`UPDATE users SET username = ?, email = ?, updated_at = ? WHERE id = ?`), strings.TrimSpace(username), strings.ToLower(strings.TrimSpace(email)), now, id)
+	result, err := s.db.ExecContext(ctx, s.rebind(`UPDATE users SET username = ?, updated_at = ? WHERE id = ?`), strings.TrimSpace(username), now, id)
 	if err != nil {
 		return model.User{}, normalizeDBError(err)
 	}
@@ -168,6 +167,81 @@ func (s *Store) UpdateProfile(ctx context.Context, id, username, email string) (
 		return model.User{}, ErrNotFound
 	}
 	return s.UserByID(ctx, id)
+}
+
+func (s *Store) CreateEmailChangeRequest(ctx context.Context, userID, newEmail, codeHash string, expiresAt int64, ip, ua string) (string, error) {
+	id := ids.New("ecr")
+	now := nowMillis()
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var lastCreated int64
+	_ = tx.GetContext(ctx, &lastCreated, s.rebind(`SELECT COALESCE(MAX(created_at), 0) FROM email_change_requests WHERE user_id = ?`), userID)
+	if lastCreated > 0 && now-lastCreated < 60_000 {
+		return "", ErrUnavailable
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_change_requests SET used_at = ? WHERE user_id = ? AND used_at = 0`), now, userID); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO email_change_requests (id, user_id, new_email, code_hash, expires_at, request_ip, request_ua, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`), id, userID, strings.ToLower(strings.TrimSpace(newEmail)), codeHash, expiresAt, ip, ua, now); err != nil {
+		return "", normalizeDBError(err)
+	}
+	return id, tx.Commit()
+}
+
+func (s *Store) ConsumeEmailChangeRequest(ctx context.Context, requestID, codeHash string) (model.User, error) {
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return model.User{}, err
+	}
+	defer tx.Rollback()
+	var row struct {
+		ID        string `db:"id"`
+		UserID    string `db:"user_id"`
+		NewEmail  string `db:"new_email"`
+		CodeHash  string `db:"code_hash"`
+		ExpiresAt int64  `db:"expires_at"`
+		UsedAt    int64  `db:"used_at"`
+	}
+	if err := tx.GetContext(ctx, &row, s.rebind(`SELECT id, user_id, new_email, code_hash, expires_at, used_at FROM email_change_requests WHERE id = ?`), requestID); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	now := nowMillis()
+	if row.UsedAt != 0 || row.ExpiresAt <= now || row.CodeHash != codeHash {
+		return model.User{}, ErrForbidden
+	}
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE email_change_requests SET used_at = ? WHERE id = ? AND used_at = 0`), now, row.ID)
+	if err != nil {
+		return model.User{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return model.User{}, ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET email = ?, email_verified = 1, auth_epoch = ?, updated_at = ? WHERE id = ?`), row.NewEmail, now, now, row.UserID); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, row.UserID); err != nil {
+		return model.User{}, err
+	}
+	var user model.User
+	if err := tx.GetContext(ctx, &user, s.rebind(`SELECT * FROM users WHERE id = ?`), row.UserID); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	return user, tx.Commit()
+}
+
+func (s *Store) PendingEmailChange(ctx context.Context, userID string) (string, int64, error) {
+	var row struct {
+		NewEmail  string `db:"new_email"`
+		ExpiresAt int64  `db:"expires_at"`
+	}
+	err := s.db.GetContext(ctx, &row, s.rebind(`SELECT new_email, expires_at FROM email_change_requests WHERE user_id = ? AND used_at = 0 AND expires_at > ? ORDER BY created_at DESC LIMIT 1`), userID, nowMillis())
+	if err != nil {
+		return "", 0, normalizeDBError(err)
+	}
+	return row.NewEmail, row.ExpiresAt, nil
 }
 
 func (s *Store) UpdatePassword(ctx context.Context, id, hash string) error {
@@ -324,11 +398,3 @@ func txGet[T any](ctx context.Context, tx *sqlx.Tx, query string, args ...any) (
 	return value, err
 }
 
-func validateProfile(username, email string) error {
-	username = strings.TrimSpace(username)
-	email = strings.TrimSpace(email)
-	if len(username) < 3 || len(username) > 40 || !strings.Contains(email, "@") || len(email) > 254 {
-		return fmt.Errorf("%w: invalid username or email", ErrInvalid)
-	}
-	return nil
-}

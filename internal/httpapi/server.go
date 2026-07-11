@@ -56,6 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/logout", s.requireAuth(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/account/me", s.requireAuth(http.HandlerFunc(s.accountMe)))
 	mux.Handle("PATCH /api/v1/account/me", s.requireAuth(http.HandlerFunc(s.updateAccount)))
+	mux.Handle("POST /api/v1/account/email/confirm", s.requireAuth(http.HandlerFunc(s.confirmEmailChange)))
 	mux.Handle("PUT /api/v1/account/password", s.requireAuth(http.HandlerFunc(s.changePassword)))
 
 	mux.Handle("GET /api/v1/membership/status", s.requireAuth(http.HandlerFunc(s.membershipStatus)))

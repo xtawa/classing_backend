@@ -56,6 +56,10 @@ func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *Store) rebind(query string) string { return s.db.Rebind(query) }
 
+func (s *Store) DB() *sqlx.DB { return s.db }
+
+func (s *Store) Rebind(query string) string { return s.db.Rebind(query) }
+
 func normalizeDBError(err error) error {
 	if err == nil {
 		return nil

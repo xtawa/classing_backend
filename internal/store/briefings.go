@@ -201,6 +201,36 @@ func (s *Store) QueueEmailVerificationJob(ctx context.Context, userID, code stri
 	return item, normalizeDBError(err)
 }
 
+func (s *Store) QueueEmailChangeVerificationJob(ctx context.Context, userID, code string, expiresAt int64, newEmail string) (model.BriefingJob, error) {
+	payload, err := json.Marshal(map[string]any{"code": code, "expiresAt": expiresAt, "toEmail": newEmail})
+	if err != nil {
+		return model.BriefingJob{}, err
+	}
+	now := nowMillis()
+	item := model.BriefingJob{
+		ID: ids.New("job"), UserID: userID, Channel: "EMAIL_CHANGE_VERIFY", Status: "PENDING",
+		ScheduledAt: now, CreatedAt: now, UpdatedAt: now, Payload: string(payload),
+	}
+	item.TargetDate = item.ID
+	_, err = s.db.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at, payload) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`), item.ID, item.UserID, item.TargetDate, item.Channel, item.ScheduledAt, item.CreatedAt, item.UpdatedAt, item.Payload)
+	return item, normalizeDBError(err)
+}
+
+func (s *Store) QueueEmailChangeNotifyJob(ctx context.Context, userID, newEmail, oldEmail string) (model.BriefingJob, error) {
+	payload, err := json.Marshal(map[string]any{"newEmail": newEmail, "toEmail": oldEmail})
+	if err != nil {
+		return model.BriefingJob{}, err
+	}
+	now := nowMillis()
+	item := model.BriefingJob{
+		ID: ids.New("job"), UserID: userID, Channel: "EMAIL_CHANGE_NOTIFY", Status: "PENDING",
+		ScheduledAt: now, CreatedAt: now, UpdatedAt: now, Payload: string(payload),
+	}
+	item.TargetDate = item.ID
+	_, err = s.db.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at, payload) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)`), item.ID, item.UserID, item.TargetDate, item.Channel, item.ScheduledAt, item.CreatedAt, item.UpdatedAt, item.Payload)
+	return item, normalizeDBError(err)
+}
+
 func (s *Store) ListBriefingJobs(ctx context.Context, limit, offset int) ([]model.BriefingJob, int, error) {
 	var total int
 	if err := s.db.GetContext(ctx, &total, `SELECT COUNT(*) FROM briefing_jobs`); err != nil {

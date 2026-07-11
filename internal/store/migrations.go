@@ -233,6 +233,18 @@ var migrations = []string{
 		created_at BIGINT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_email_verification_user ON email_verification_challenges(user_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS email_change_requests (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		new_email TEXT NOT NULL,
+		code_hash TEXT NOT NULL,
+		expires_at BIGINT NOT NULL,
+		used_at BIGINT NOT NULL DEFAULT 0,
+		request_ip TEXT NOT NULL DEFAULT '',
+		request_ua TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_email_change_user ON email_change_requests(user_id, created_at)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

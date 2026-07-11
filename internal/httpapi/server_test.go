@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -389,5 +390,170 @@ func TestBriefingRejectsInvalidTimeAndTimezone(t *testing.T) {
 		if status != http.StatusBadRequest {
 			t.Fatalf("invalid briefing request status = %d request=%+v", status, request)
 		}
+	}
+}
+
+func TestAccountEmailChangeSecurity(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if _, err := data.BootstrapAdmin(ctx, "admin", "admin@classing.test", "AdminPass123!"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, ResetTokenTTL: time.Minute, EmailVerificationTTL: time.Minute, ExposeResetToken: true, ExposeVerificationCode: true, MaxCloudDocumentSize: 1024 * 1024}
+	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>Classing</title>")}}
+	testServer := httptest.NewServer(New(cfg, data, web, slog.Default()).Handler())
+	defer testServer.Close()
+	client := testClient{base: testServer.URL, client: testServer.Client()}
+
+	registerUser := func(username, email, password string) string {
+		t.Helper()
+		status, body := client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": username, "email": email, "password": password})
+		if status != http.StatusAccepted {
+			t.Fatalf("register %s: %d %+v", username, status, body)
+		}
+		challenge := body["challenge"].(map[string]any)
+		status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challenge["challengeId"], "verificationCode": body["devVerificationCode"]})
+		if status != http.StatusCreated {
+			t.Fatalf("confirm %s: %d %+v", username, status, body)
+		}
+		return body["session"].(map[string]any)["accessToken"].(string)
+	}
+
+	// --- Stolen-session: email change without currentPassword ---
+	bobAccess := registerUser("bob", "bob@old.test", "UserPass123!")
+	status, body := client.request(t, http.MethodPatch, "/api/v1/account/me", bobAccess, map[string]any{"username": "bob", "email": "bob@new.test"})
+	if status != http.StatusForbidden || body["code"] != "ACCOUNT_PASSWORD_CURRENT_INVALID" {
+		t.Fatalf("email change without password: %d %+v", status, body)
+	}
+	// --- Stolen-session: wrong currentPassword ---
+	status, body = client.request(t, http.MethodPatch, "/api/v1/account/me", bobAccess, map[string]any{"username": "bob", "email": "bob@new.test", "currentPassword": "WrongPass123!"})
+	if status != http.StatusForbidden || body["code"] != "ACCOUNT_PASSWORD_CURRENT_INVALID" {
+		t.Fatalf("email change with wrong password: %d %+v", status, body)
+	}
+	// --- Verify email not changed ---
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", bobAccess, nil)
+	if status != http.StatusOK || body["account"].(map[string]any)["email"] != "bob@old.test" {
+		t.Fatalf("email should still be old: %d %+v", status, body)
+	}
+
+	// --- Duplicate email ---
+	registerUser("eve", "eve@test.com", "EvePass123!")
+	status, body = client.request(t, http.MethodPatch, "/api/v1/account/me", bobAccess, map[string]any{"username": "bob", "email": "eve@test.com", "currentPassword": "UserPass123!"})
+	if status != http.StatusConflict || body["code"] != "ACCOUNT_EMAIL_CONFLICT" {
+		t.Fatalf("duplicate email: %d %+v", status, body)
+	}
+
+	// --- Full email change flow ---
+	status, body = client.request(t, http.MethodPatch, "/api/v1/account/me", bobAccess, map[string]any{"username": "bob", "email": "bob@new.test", "currentPassword": "UserPass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("email change request: %d %+v", status, body)
+	}
+	emailChange := body["emailChange"].(map[string]any)
+	requestID := emailChange["requestId"].(string)
+	code := body["devVerificationCode"].(string)
+	// --- Pending email visible in account ---
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", bobAccess, nil)
+	if status != http.StatusOK {
+		t.Fatalf("account me after change request: %d %+v", status, body)
+	}
+	pending, ok := body["pendingEmailChange"].(map[string]any)
+	if !ok || pending["newEmail"] != "bob@new.test" {
+		t.Fatalf("pending email change not shown: %+v", body)
+	}
+	// --- Queued jobs ---
+	jobs, _, err := data.ListBriefingJobs(ctx, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasVerifyJob := false
+	hasNotifyJob := false
+	for _, job := range jobs {
+		if job.Channel == "EMAIL_CHANGE_VERIFY" {
+			hasVerifyJob = true
+			if !strings.Contains(job.Payload, "bob@new.test") {
+				t.Fatalf("verify job payload missing new email: %s", job.Payload)
+			}
+		}
+		if job.Channel == "EMAIL_CHANGE_NOTIFY" {
+			hasNotifyJob = true
+			if !strings.Contains(job.Payload, "bob@old.test") {
+				t.Fatalf("notify job payload missing old email: %s", job.Payload)
+			}
+		}
+	}
+	if !hasVerifyJob || !hasNotifyJob {
+		t.Fatalf("email change jobs not queued: verify=%v notify=%v", hasVerifyJob, hasNotifyJob)
+	}
+	// --- Login with old email still works (before confirm) ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "bob@old.test", "password": "UserPass123!"})
+	if status != http.StatusOK {
+		t.Fatalf("login with old email before confirm: %d %+v", status, body)
+	}
+	// --- Password reset with new email does nothing (not in DB) ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/password/reset/request", "", map[string]any{"email": "bob@new.test"})
+	if status != http.StatusAccepted {
+		t.Fatalf("reset request with new email: %d %+v", status, body)
+	}
+	if _, ok := body["devResetToken"]; ok {
+		t.Fatal("reset token should not be exposed for unconfirmed email")
+	}
+	// --- Password reset with old email works ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/password/reset/request", "", map[string]any{"email": "bob@old.test"})
+	if status != http.StatusAccepted {
+		t.Fatalf("reset request with old email: %d %+v", status, body)
+	}
+
+	// --- Confirm email change ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/account/email/confirm", bobAccess, map[string]any{"requestId": requestID, "verificationCode": code})
+	if status != http.StatusOK {
+		t.Fatalf("confirm email change: %d %+v", status, body)
+	}
+	if body["account"].(map[string]any)["email"] != "bob@new.test" {
+		t.Fatalf("email not updated: %+v", body)
+	}
+	if body["sessionsRevoked"] != true {
+		t.Fatal("sessionsRevoked should be true")
+	}
+	// --- Old access token revoked (auth_epoch bumped) ---
+	status, _ = client.request(t, http.MethodGet, "/api/v1/account/me", bobAccess, nil)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("old access token after email change: status = %d", status)
+	}
+	// --- Login with new email ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "bob@new.test", "password": "UserPass123!"})
+	if status != http.StatusOK {
+		t.Fatalf("login with new email: %d %+v", status, body)
+	}
+	bobAccess = body["session"].(map[string]any)["accessToken"].(string)
+
+	// --- Code reuse: confirm again with same request ---
+	status, body = client.request(t, http.MethodPost, "/api/v1/account/email/confirm", bobAccess, map[string]any{"requestId": requestID, "verificationCode": code})
+	if status != http.StatusBadRequest || body["code"] != "ACCOUNT_EMAIL_VERIFICATION_INVALID" {
+		t.Fatalf("code reuse: %d %+v", status, body)
+	}
+
+	// --- Verification code expiry ---
+	carolAccess := registerUser("carol", "carol@old.test", "CarolPass123!")
+	status, body = client.request(t, http.MethodPatch, "/api/v1/account/me", carolAccess, map[string]any{"username": "carol", "email": "carol@new.test", "currentPassword": "CarolPass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("carol email change: %d %+v", status, body)
+	}
+	expiredRequestID := body["emailChange"].(map[string]any)["requestId"].(string)
+	expiredCode := body["devVerificationCode"].(string)
+	if _, err := data.DB().Exec(data.Rebind(`UPDATE email_change_requests SET expires_at = ? WHERE id = ?`), 1, expiredRequestID); err != nil {
+		t.Fatal(err)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/account/email/confirm", carolAccess, map[string]any{"requestId": expiredRequestID, "verificationCode": expiredCode})
+	if status != http.StatusBadRequest || body["code"] != "ACCOUNT_EMAIL_VERIFICATION_INVALID" {
+		t.Fatalf("expired code: %d %+v", status, body)
+	}
+	// --- Verify email not changed ---
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", carolAccess, nil)
+	if status != http.StatusOK || body["account"].(map[string]any)["email"] != "carol@old.test" {
+		t.Fatalf("carol email should still be old after expired confirm: %+v", body)
 	}
 }

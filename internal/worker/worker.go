@@ -137,10 +137,19 @@ func send(mailbox model.Mailbox, job store.ClaimedJob) error {
 			return err
 		}
 	}
+	recipient := job.Email
+	if job.Payload != "" {
+		var override struct {
+			ToEmail string `json:"toEmail"`
+		}
+		if json.Unmarshal([]byte(job.Payload), &override) == nil && override.ToEmail != "" {
+			recipient = override.ToEmail
+		}
+	}
 	if err := client.Mail(mailbox.FromAddress); err != nil {
 		return err
 	}
-	if err := client.Rcpt(job.Email); err != nil {
+	if err := client.Rcpt(recipient); err != nil {
 		return err
 	}
 	writer, err := client.Data()
@@ -152,7 +161,7 @@ func send(mailbox model.Mailbox, job store.ClaimedJob) error {
 		return err
 	}
 	subject := mime.BEncoding.Encode("UTF-8", subjectText)
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", mailbox.FromAddress, job.Email, subject, body)
+	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", mailbox.FromAddress, recipient, subject, body)
 	if _, err := writer.Write([]byte(message)); err != nil {
 		return err
 	}
@@ -197,6 +206,31 @@ func mailContent(job store.ClaimedJob) (string, string, error) {
 		return "Classing email verification", fmt.Sprintf(
 			"Hello %s,\r\n\r\nYour Classing verification code is:\r\n\r\n%s\r\n\r\nThe code expires at %s. If you did not request this account, ignore this email.\r\n",
 			job.Username, payload.Code, expires,
+		), nil
+	case "EMAIL_CHANGE_VERIFY":
+		var payload struct {
+			Code      string `json:"code"`
+			ExpiresAt int64  `json:"expiresAt"`
+			ToEmail   string `json:"toEmail"`
+		}
+		if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil || payload.Code == "" {
+			return "", "", fmt.Errorf("invalid email change verification payload")
+		}
+		expires := time.UnixMilli(payload.ExpiresAt).Format("2006-01-02 15:04:05 MST")
+		return "Classing email change verification", fmt.Sprintf(
+			"Hello %s,\r\n\r\nYou requested to change your Classing account email to %s. Use the following verification code to confirm the change:\r\n\r\n%s\r\n\r\nThe code expires at %s. If you did not request this change, please secure your account immediately.\r\n",
+			job.Username, payload.ToEmail, payload.Code, expires,
+		), nil
+	case "EMAIL_CHANGE_NOTIFY":
+		var payload struct {
+			NewEmail string `json:"newEmail"`
+		}
+		if err := json.Unmarshal([]byte(job.Payload), &payload); err != nil || payload.NewEmail == "" {
+			return "", "", fmt.Errorf("invalid email change notify payload")
+		}
+		return "Classing email address change notice", fmt.Sprintf(
+			"Hello %s,\r\n\r\nA request was made to change the email address on your Classing account to %s. If you did not make this request, please change your password immediately.\r\n",
+			job.Username, payload.NewEmail,
 		), nil
 	default:
 		return "", "", fmt.Errorf("unsupported mail job channel %s", job.Channel)
