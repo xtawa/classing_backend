@@ -207,19 +207,36 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "AUTH_REFRESH_REQUIRED", "refresh token is required")
 		return
 	}
-	newRefresh := ids.Token(32)
-	newExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
-	user, err := s.store.RotateRefreshToken(r.Context(), auth.HashOpaqueToken(body.RefreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, clientIP(r), r.UserAgent())
+	refreshToken := strings.TrimSpace(body.RefreshToken)
+	cacheKey := refreshReplayKey(refreshToken, clientIP(r), r.UserAgent())
+	session, err := s.refreshReplays.do(r.Context(), cacheKey, func() (refreshSession, error) {
+		newRefresh := ids.Token(32)
+		newExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
+		user, err := s.store.RotateRefreshToken(r.Context(), auth.HashOpaqueToken(refreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, clientIP(r), r.UserAgent())
+		if err != nil {
+			return refreshSession{}, err
+		}
+		accessToken, accessExpiresAt, err := s.tokens.Issue(user)
+		if err != nil {
+			return refreshSession{}, fmt.Errorf("%w: %v", errRefreshSessionIssue, err)
+		}
+		return refreshSession{
+			UserID:           user.ID,
+			AccessToken:      accessToken,
+			RefreshToken:     newRefresh,
+			AccessExpiresAt:  accessExpiresAt,
+			RefreshExpiresAt: newExpiresAt,
+		}, nil
+	})
 	if err != nil {
+		if errors.Is(err, errRefreshSessionIssue) {
+			writeError(w, r, http.StatusInternalServerError, "AUTH_SESSION_FAILED", "could not refresh session")
+			return
+		}
 		writeError(w, r, http.StatusUnauthorized, "AUTH_REFRESH_REVOKED", "refresh token is invalid, expired or already used")
 		return
 	}
-	accessToken, accessExpiresAt, err := s.tokens.Issue(user)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "AUTH_SESSION_FAILED", "could not refresh session")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"session": map[string]any{"accessToken": accessToken, "refreshToken": newRefresh, "accessExpiresAt": accessExpiresAt, "refreshExpiresAt": newExpiresAt}})
+	writeJSON(w, http.StatusOK, map[string]any{"session": session})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +248,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	user := principal(r).User
 	_ = s.store.RevokeRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(body.RefreshToken))
+	s.refreshReplays.invalidateUser(user.ID)
 	s.audit(r, user.ID, "AUTH_LOGOUT", "SESSION", "", nil)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
@@ -278,6 +296,7 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "AUTH_RESET_TOKEN_INVALID", "reset token is invalid, expired or already used")
 		return
 	}
+	s.refreshReplays.invalidateUser(userID)
 	s.audit(r, userID, "AUTH_PASSWORD_RESET_CONFIRM", "USER", userID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }

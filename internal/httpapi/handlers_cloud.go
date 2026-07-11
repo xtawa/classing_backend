@@ -238,7 +238,7 @@ func mergeSettingsCloudDocument(currentPayload, incomingPayload []byte) ([]byte,
 		}
 	}
 	current["records"] = records
-	current["changes"] = append(filterCloudChanges(current["changes"]), filterCloudChanges(incoming["changes"])...)
+	current["changes"] = mergeCloudChanges(current["changes"], filterCloudChanges(incoming["changes"]))
 	if devices, ok := incoming["devices"].([]any); ok {
 		current["devices"] = devices
 	}
@@ -282,7 +282,7 @@ func filterCloudChanges(value any) []any {
 	if !ok {
 		return []any{}
 	}
-	result := []any{}
+	allowed := []any{}
 	for _, raw := range changes {
 		item, ok := raw.(map[string]any)
 		if !ok {
@@ -290,10 +290,89 @@ func filterCloudChanges(value any) []any {
 		}
 		domain, _ := item["domain"].(string)
 		if settingsCloudDomains[domain] {
+			allowed = append(allowed, item)
+		}
+	}
+	return mergeCloudChanges(allowed)
+}
+
+func mergeCloudChanges(values ...any) []any {
+	result := []any{}
+	positions := map[string]int{}
+	for _, value := range values {
+		changes, ok := value.([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range changes {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			key := cloudChangeKey(item)
+			if position, exists := positions[key]; exists {
+				existing, _ := result[position].(map[string]any)
+				if cloudChangeIsNewer(item, existing) {
+					result[position] = item
+				}
+				continue
+			}
+			positions[key] = len(result)
 			result = append(result, item)
 		}
 	}
 	return result
+}
+
+func cloudChangeKey(item map[string]any) string {
+	if id, _ := item["id"].(string); strings.TrimSpace(id) != "" {
+		domain, _ := item["domain"].(string)
+		return "id:" + domain + ":" + strings.TrimSpace(id)
+	}
+	encoded, _ := json.Marshal(item)
+	return "anonymous:" + string(encoded)
+}
+
+func cloudChangeIsNewer(candidate, existing map[string]any) bool {
+	candidateCounter, candidateDeviceID, candidateChangedAt, candidateOccurredAt := cloudChangeOrder(candidate)
+	existingCounter, existingDeviceID, existingChangedAt, existingOccurredAt := cloudChangeOrder(existing)
+	if candidateCounter != existingCounter {
+		return candidateCounter > existingCounter
+	}
+	if candidateDeviceID != existingDeviceID {
+		return candidateDeviceID > existingDeviceID
+	}
+	if candidateChangedAt != existingChangedAt {
+		return candidateChangedAt > existingChangedAt
+	}
+	return candidateOccurredAt > existingOccurredAt
+}
+
+func cloudChangeOrder(item map[string]any) (counter int64, deviceID string, changedAt, occurredAt int64) {
+	if version, ok := item["version"].(map[string]any); ok {
+		counter = cloudJSONInt64(version["counter"])
+		deviceID, _ = version["deviceId"].(string)
+		changedAt = cloudJSONInt64(version["changedAt"])
+	}
+	return counter, deviceID, changedAt, cloudJSONInt64(item["occurredAt"])
+}
+
+func cloudJSONInt64(value any) int64 {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func (s *Server) enqueueAppBriefingTestCommand(r *http.Request, userID string) error {

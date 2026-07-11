@@ -68,6 +68,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "ACCOUNT_PASSWORD")
 		return
 	}
+	s.refreshReplays.invalidateUser(user.ID)
 	s.audit(r, user.ID, "ACCOUNT_PASSWORD_CHANGE", "USER", user.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "sessionsRevoked": true})
 }

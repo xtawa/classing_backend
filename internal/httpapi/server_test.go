@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -183,6 +184,21 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 	session := body["session"].(map[string]any)
 	access := session["accessToken"].(string)
 	refresh := session["refreshToken"].(string)
+	status, firstRefresh := client.request(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
+	if status != http.StatusOK {
+		t.Fatalf("first refresh: %d %+v", status, firstRefresh)
+	}
+	status, replayedRefresh := client.request(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": refresh})
+	if status != http.StatusOK {
+		t.Fatalf("replayed refresh: %d %+v", status, replayedRefresh)
+	}
+	firstRefreshSession := firstRefresh["session"].(map[string]any)
+	replayedRefreshSession := replayedRefresh["session"].(map[string]any)
+	if !reflect.DeepEqual(firstRefreshSession, replayedRefreshSession) {
+		t.Fatalf("refresh replay returned a different replacement session: first=%+v replay=%+v", firstRefreshSession, replayedRefreshSession)
+	}
+	access = firstRefreshSession["accessToken"].(string)
+	refresh = firstRefreshSession["refreshToken"].(string)
 
 	status, body = client.request(t, http.MethodPost, "/api/v1/timetables", access, map[string]any{"name": "Autumn", "timezone": "Asia/Shanghai", "weekCount": 20, "document": map[string]any{"lessons": []any{}}})
 	if status != http.StatusCreated {
@@ -200,7 +216,10 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 			"mobile.settings":   []any{map[string]any{"id": "showWeekend", "payload": `{"value":false}`, "version": map[string]any{"counter": float64(1), "deviceId": "test", "changedAt": float64(1000)}}},
 			"timetable.lessons": []any{map[string]any{"id": "lesson-1", "payload": `{"id":"lesson-1","title":"Math"}`, "version": map[string]any{"counter": float64(2), "deviceId": "test", "changedAt": float64(1000)}}},
 		},
-		"changes": []any{},
+		"changes": []any{
+			map[string]any{"id": "change-settings-1", "domain": "mobile.settings", "recordId": "showWeekend", "action": "updated", "version": map[string]any{"counter": float64(1), "deviceId": "test", "changedAt": float64(1000)}, "occurredAt": float64(1000)},
+			map[string]any{"id": "change-lesson-1", "domain": "timetable.lessons", "recordId": "lesson-1", "action": "created", "version": map[string]any{"counter": float64(2), "deviceId": "test", "changedAt": float64(1000)}, "occurredAt": float64(1000)},
+		},
 		"devices": []any{},
 	}
 	status, body = client.request(t, http.MethodPut, "/api/v1/cloud/official/document", access, settingsDoc)
@@ -217,6 +236,40 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 	}
 	if _, ok := records["timetable.lessons"]; ok {
 		t.Fatalf("non-member cloud document exposed timetable: %+v", body)
+	}
+	changes, ok := body["changes"].([]any)
+	if !ok || len(changes) != 1 {
+		t.Fatalf("non-member cloud document changes were not filtered: %+v", body)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		status, body = client.request(t, http.MethodPut, "/api/v1/cloud/official/document", access, body)
+		if status != http.StatusOK {
+			t.Fatalf("repeated non-member settings put %d: %d %+v", attempt+1, status, body)
+		}
+		status, body = client.request(t, http.MethodGet, "/api/v1/cloud/official/document", access, nil)
+		if status != http.StatusOK {
+			t.Fatalf("cloud document after repeated put %d: %d %+v", attempt+1, status, body)
+		}
+		changes, ok = body["changes"].([]any)
+		if !ok || len(changes) != 1 {
+			t.Fatalf("repeated put %d grew cloud changes: %+v", attempt+1, body)
+		}
+	}
+	alice, err := data.UserByIdentifier(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedDocument, err := data.CloudDocument(ctx, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedPayload := map[string]any{}
+	if err := json.Unmarshal([]byte(storedDocument.Payload), &storedPayload); err != nil {
+		t.Fatal(err)
+	}
+	storedChanges, ok := storedPayload["changes"].([]any)
+	if !ok || len(storedChanges) != 1 {
+		t.Fatalf("repeated puts grew stored cloud changes: %+v", storedPayload)
 	}
 	status, body = client.request(t, http.MethodPost, "/api/v1/briefings/daily/test", access, map[string]any{"channel": "APP_NOTIFICATION"})
 	if status != http.StatusAccepted || body["appNotificationQueued"] != true {
@@ -250,9 +303,21 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 		t.Fatalf("official cloud ping: %d %+v", status, body)
 	}
 
+	replayAfterRevocationToken := refresh
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": replayAfterRevocationToken})
+	if status != http.StatusOK {
+		t.Fatalf("refresh before password change: %d %+v", status, body)
+	}
+	prePasswordChangeSession := body["session"].(map[string]any)
+	access = prePasswordChangeSession["accessToken"].(string)
+	refresh = prePasswordChangeSession["refreshToken"].(string)
 	status, body = client.request(t, http.MethodPut, "/api/v1/account/password", access, map[string]any{"currentPassword": "UserPass123!", "newPassword": "UserPass456!"})
 	if status != http.StatusOK {
 		t.Fatalf("password change: %d %+v", status, body)
+	}
+	status, _ = client.request(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": replayAfterRevocationToken})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("cached refresh token after password change status = %d", status)
 	}
 	status, _ = client.request(t, http.MethodGet, "/api/v1/account/me", access, nil)
 	if status != http.StatusUnauthorized {

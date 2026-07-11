@@ -61,8 +61,9 @@
 ```
 
 说明：
-- 刷新成功后建议轮换 refresh token。
-- 旧 refresh token 立即失效，防止并发复用。
+- 刷新成功后后端会一次性轮换 refresh token，客户端必须保存响应中的新 token。
+- 旧 refresh token 在首次成功轮换后立即失效；为兼容同一客户端的并发请求，相同 token、IP 与 User-Agent 在 5 秒内会重放完全相同的 replacement session，不会再次轮换。
+- 5 秒窗口之外再次使用旧 token 返回 `401 AUTH_REFRESH_REVOKED`。客户端仍应使用 single-flight，避免并发刷新。
 
 ## 5. 登出
 

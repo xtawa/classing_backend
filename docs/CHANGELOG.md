@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-07-11 · 官方云会话刷新竞态修复
+
+### Fixed
+
+- 修复 Android 同一时刻触发多次官方云同步时，多个请求并发轮换同一个一次性 refresh token，导致一个请求成功而另一个请求返回 `401 AUTH_REFRESH_REVOKED`、进而误报官方云连接失败的问题。
+- 后端对相同 refresh token、客户端 IP 和 User-Agent 增加 5 秒 single-flight 与成功响应重放窗口；窗口内返回完全相同的新 access token、refresh token 与过期时间，不再重复旋转令牌。失败结果不会缓存。
+- 密码修改、密码重置、管理员更新账户状态或角色以及登出现在会立即清理该用户的短时 refresh replay；账户撤销后，即使仍在 5 秒窗口内，最初的旧 token 也不会再收到缓存的 200 响应。
+- 修复非会员设置同步在 GET 后原样 PUT 时重复追加同一批 `changes` 的问题；服务端现在按 change ID 稳定合并，并在缺少 ID 时按规范化内容去重，避免云文档持续膨胀直至触发大小限制。
+
+### Verified
+
+- 新增接口回归测试，验证同一旧 refresh token 紧接请求两次均返回 200 且 replacement session 完全一致，并保留密码变更后旧 access token 和 refresh token 失效的断言。
+- 新增并发 single-flight 与错误不缓存单元测试。
+- 新增撤销一致性回归测试，验证首次 refresh 后立即修改密码，再次提交最初旧 refresh token 必须返回 401。
+- 新增非会员官方云重复 PUT 回归测试，连续写回同一文档时 `changes` 数量保持不变。
+
 ## 2026-07-11 · 云同步连接与设置实时同步修复
 
 ### Changed

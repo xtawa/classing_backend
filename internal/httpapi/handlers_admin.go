@@ -53,6 +53,7 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "ADMIN_USER")
 		return
 	}
+	s.refreshReplays.invalidateUser(user.ID)
 	s.audit(r, principal(r).User.ID, "ADMIN_USER_UPDATE", "USER", targetID, map[string]any{"role": user.Role, "status": user.Status})
 	writeJSON(w, http.StatusOK, map[string]any{"user": accountPayload(user)})
 }
