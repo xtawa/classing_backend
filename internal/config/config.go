@@ -89,9 +89,6 @@ func Load() (Config, error) {
 	if (cfg.TurnstileSiteKey == "") != (cfg.TurnstileSecret == "") {
 		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET must be configured together")
 	}
-	if cfg.Environment == "production" && cfg.TurnstileSecret == "" {
-		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required in production")
-	}
 	return cfg, nil
 }
 
