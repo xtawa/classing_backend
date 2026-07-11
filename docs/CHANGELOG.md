@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-11 · Turnstile 生产配置
+
+### Fixed
+
+- Docker Compose 现在会把 `TURNSTILE_SITE_KEY`、`TURNSTILE_SECRET` 和 `EMAIL_VERIFICATION_TTL` 从服务器 `.env` 映射到后端容器，确保生产注册真正启用 Turnstile 与 SMTP 验证策略。
+
+### Verified
+
+- 部署后通过注册配置接口确认 Turnstile 已强制启用，并验证缺少 Turnstile token 的注册申请会被拒绝。
+
 ## 2026-07-10 · 注册验证、实时设置同步与管理台维护
 
 ### Added
