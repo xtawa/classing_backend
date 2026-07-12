@@ -1,10 +1,16 @@
-.PHONY: run test build linux-amd64 linux-arm64 clean
+.PHONY: run test test-race test-pg build linux-amd64 linux-arm64 clean
 
 run:
 	go run ./cmd/server
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./...
+
+test-pg:
+	TEST_POSTGRES_DSN="$(TEST_POSTGRES_DSN)" go test ./...
 
 build:
 	mkdir -p dist

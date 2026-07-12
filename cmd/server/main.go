@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "migrate-status" {
+		runMigrateStatus()
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := config.Load()
 	if err != nil {
@@ -71,5 +77,33 @@ func main() {
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown", "error", err)
+	}
+}
+
+func runMigrateStatus() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("load configuration", "error", err)
+		os.Exit(1)
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	data, err := store.OpenNoMigrate(ctx, cfg.DatabaseDriver, cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("open data store", "error", err)
+		os.Exit(1)
+	}
+	defer data.Close()
+	status, err := data.MigrationStatus(ctx)
+	if err != nil {
+		logger.Error("query migration status", "error", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Applied migrations: %d\n", status.Applied)
+	fmt.Printf("Latest available:   %d\n", status.Available)
+	fmt.Printf("Pending:            %d\n", status.Pending)
+	if status.Pending > 0 {
+		os.Exit(1)
 	}
 }

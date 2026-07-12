@@ -1,5 +1,56 @@
 # Changelog
 
+## 2026-07-12 · 版本发布流程缺口复核
+
+### Reviewed
+- 版本发布流程已具备 E2E 覆盖：草稿/发布/删除、`LatestRelease` 选择、`versionCode` 比较、`ETag`、`ServeContent` Range/长度与哈希元数据（`internal/httpapi/server_test.go::TestAnnouncementsAndReleaseUploadDownload`，含 `Range: bytes=0-7` → 206 + `Content-Length: 8` 断言）。
+
+### Gaps
+- **channel 未限制**：`internal/store/releases.go` 的 `normalizeChannel` / `CreateRelease` 未校验渠道白名单，任意字符串均可入库。
+- **minSupported 可为负**：`CreateRelease` 未校验 `MinSupportedVersionCode` 下界，负值可入库。
+- **发布不复核文件/hash**：`internal/httpapi/handlers_releases.go` 的 `adminPublishRelease` 仅翻转 `status`，未重新校验磁盘文件存在性 / 大小 / SHA-256 与记录一致。
+- **删除产生孤儿**：`adminDeleteRelease` 先删数据库（事务）再 best-effort 删除文件，文件清理失败会留下孤儿文件（存储泄漏）。
+- **下载不验证磁盘文件**：`publicDownloadRelease` 按记录名直接 `ServeContent`，未校验实际文件大小 / 哈希与记录一致；`ETag` 取自记录值而非实际文件。
+
+### Client Impact
+- 结论：**无需客户端适配**。客户端已具备完整下载完整性防线与失败容错，五个缺口均在客户端被兜底或不可达。
+- 依据（WearOS 客户端 `mobile/src/main/java/com/classing/mobile/timetable/update/UpdateApiClient.kt`）：
+  - **下载完整性**：`downloadRelease` 写盘同时流式计算 SHA-256，完成后比对 `release.sha256` 与 `artifactSize`，不匹配则丢弃 `.part` 且不唤起安装器（L160-166）。客户端不信任服务端 `ETag` →「下载不验证磁盘文件」缺口被客户端兜底。
+  - **下载失败容错**：HTTP 非 2xx（含 404）即 `Result.failure`，UI 显示「下载失败」（L132-135, MobileSettingsAbout.kt L2337）→「发布不复核」「删除竞态」导致的 404 已被容错。
+  - **channel**：`checkLatest` 硬编码 `channel=STABLE`（L100），不会发送未知渠道 →「channel 未限制」对客户端不可达。
+  - **minSupportedVersionCode**：仅解析入 `AppUpdateRelease` 字段（L202），`checkLatest` 与 UI 均未用于强制升级门禁 → 负值被忽略。
+
+### Backend Hardening (Proposed, not yet applied)
+- `CreateRelease`：渠道白名单（`STABLE` / `BETA`）+ `MinSupportedVersionCode ≥ 0` 校验。
+- `adminPublishRelease`：发布前 stat + 大小 + SHA-256 复核磁盘文件，不匹配则拒绝发布（发布为管理员低频操作，重哈希成本可接受）。
+- `publicDownloadRelease`：提供前校验实际文件大小 == 记录 `ArtifactSize`（廉价防线，每请求仅一次 stat）；完整哈希复核由客户端 SHA-256 兜底，不在下载路径重算。
+- `adminDeleteRelease`：**保持 DB-first 顺序**（允许在途下载完成，避免 broken release 暴露给客户端）；孤儿文件清理失败建议后续引入 reaper / 管理端清理工具，而非重排为 file-first（会中断在途下载、损害客户端体验）。
+
+## 2026-07-12 · 数据库迁移测试与事务一致性修复
+
+### Changed
+
+- `SetMembership` 管理员会员调整现已在单个数据库事务内完成会员表更新与 `membership_events` 审计事件插入；事件插入失败不再被吞掉，整个操作回滚。同时在事务内读取旧值，消除读-写 TOCTOU 竞态。
+- `DeleteRelease` 管理员删除版本现已在单个事务内完成 `app_releases` 行删除与 `audit_logs` 审计写入，保证审计记录与业务删除原子提交。文件系统清理改为事务提交后 best-effort 执行，失败时记录告警日志而非静默忽略。
+- 新增 `AuditContext` 类型与 `auditInTx` 方法，支持将 HTTP 级审计元数据（requestID / IP / UA）传入 store 层事务内写入。
+
+### Added
+
+- 新增 `migrate-status` CLI 子命令，输出已应用 / 可用 / 待处理迁移数量；有 pending 迁移时退出码为 1，可用于部署前检查。该命令不执行迁移，仅查询当前状态。
+- 新增双方言测试 harness（`internal/store/testdb_test.go`），通过 `TEST_POSTGRES_DSN` 环境变量门控：未设置时仅跑 SQLite，设置后自动追加 PostgreSQL 子测试（重建 public schema 获得干净状态）。
+- 新增 3 个 DB 级并发回归测试：并发兑换同一 CAMPAIGN 码（20 goroutine / 恰好 max_redemptions 成功）、并发写入同一云文档版本（10 / 1 成功）、并发轮换同一 refresh token（2 / 1 成功）。
+- 新增 2 个事务一致性测试：`SetMembership` 验证会员与事件同时写入、`DeleteRelease` 验证删除与审计同时写入。
+- 迁移测试改造为表驱动双方言：`TestMigrateEmptyDB`（空库初始化全表校验）、`TestMigrateIdempotent`（连续迁移幂等性）、`TestMigrateRepairsLegacyVersionRegistry`（旧版本号错位修复）均自动覆盖 SQLite + PostgreSQL。
+- 新增 [docs/migration-management.md](migration-management.md)：迁移机制说明、新增迁移幂等规范、`migrate-status` 用法、PostgreSQL / SQLite 快照回滚流程。
+- Makefile 新增 `test-race`（`go test -race ./...`）与 `test-pg`（传递 `TEST_POSTGRES_DSN`）target。
+
+### Verified
+
+- `go test ./...` 全绿（auth / httpapi / store）；`go vet ./...` 无警告。
+- `migrate-status` 在空库输出 `Applied: 0, Available: 31, Pending: 31`，退出码 1。
+- 并发测试在 SQLite（串行化）下验证逻辑正确性；PostgreSQL 路径在设置 `TEST_POSTGRES_DSN` 后自动激活。
+- `-race` 检测需 CGO + gcc，当前 Windows 环境不可用，Makefile target 已就绪供 Linux CI 使用。
+
 ## 2026-07-11 · 官方云会话刷新竞态修复
 
 ### Fixed

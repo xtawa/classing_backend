@@ -323,3 +323,16 @@ func (s *Server) audit(r *http.Request, actorID, action, targetType, targetID st
 		s.log.Warn("write audit log", "error", err, "request_id", requestID(r))
 	}
 }
+
+func (s *Server) auditContext(r *http.Request, actorID, action, targetType, targetID string, metadata map[string]any) store.AuditContext {
+	return store.AuditContext{
+		ActorID:    actorID,
+		Action:     action,
+		TargetType: targetType,
+		TargetID:   targetID,
+		RequestID:  requestID(r),
+		IPAddress:  s.clientIP(r),
+		UserAgent:  r.UserAgent(),
+		Metadata:   metadata,
+	}
+}

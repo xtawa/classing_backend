@@ -50,6 +50,24 @@ func Open(ctx context.Context, driver, dataSource string) (*Store, error) {
 	return store, nil
 }
 
+// OpenNoMigrate opens the database without running migrations. Used by
+// inspection commands (e.g. migrate-status) that must report current state
+// without applying pending migrations.
+func OpenNoMigrate(ctx context.Context, driver, dataSource string) (*Store, error) {
+	db, err := sqlx.Open(driver, dataSource)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if driver == "sqlite" {
+		db.SetMaxOpenConns(1)
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return &Store{db: db, dialect: driver}, nil
+}
+
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

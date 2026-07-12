@@ -9,6 +9,13 @@ import (
 
 // Migrations are append-only once a release has been deployed. Existing
 // installations identify migrations by their one-based position in this slice.
+//
+// Idempotency rules for new entries:
+//   - Prefer CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS.
+//   - SQLite does not support ALTER TABLE ... ADD COLUMN IF NOT EXISTS, so
+//     any new ALTER TABLE ADD COLUMN must be wrapped in an ensure*Column
+//     helper (see ensureFailedAttemptsColumns) rather than added directly to
+//     this slice. This keeps the migration idempotent across both dialects.
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
@@ -282,6 +289,49 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
+}
+
+// MigrationStatus reports how many migrations have been applied versus how
+// many are available. It does NOT run pending migrations.
+type MigrationStatus struct {
+	Applied   int
+	Available int
+	Pending   int
+}
+
+func (s *Store) MigrationStatus(ctx context.Context) (MigrationStatus, error) {
+	available := len(migrations)
+	exists, err := s.schemaMigrationsExists(ctx)
+	if err != nil {
+		return MigrationStatus{}, err
+	}
+	if !exists {
+		return MigrationStatus{Applied: 0, Available: available, Pending: available}, nil
+	}
+	var applied int
+	if err := s.db.GetContext(ctx, &applied, s.rebind(`SELECT COUNT(*) FROM schema_migrations`)); err != nil {
+		return MigrationStatus{}, fmt.Errorf("query schema_migrations: %w", err)
+	}
+	return MigrationStatus{Applied: applied, Available: available, Pending: available - applied}, nil
+}
+
+func (s *Store) schemaMigrationsExists(ctx context.Context) (bool, error) {
+	switch s.dialect {
+	case "pgx":
+		var count int
+		if err := s.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'schema_migrations'`); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	case "sqlite":
+		var count int
+		if err := s.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	default:
+		return false, fmt.Errorf("unsupported database dialect %q", s.dialect)
+	}
 }
 
 func (s *Store) ensureBriefingJobsPayload(ctx context.Context, tx *sqlx.Tx) error {

@@ -158,19 +158,28 @@ func (s *Store) Redeem(ctx context.Context, userID, code string) (model.Membersh
 }
 
 func (s *Store) SetMembership(ctx context.Context, actorID, userID, tier string, expiresAt int64, action string) (model.Membership, error) {
-	old, err := s.Membership(ctx, userID)
-	if err != nil {
-		return model.Membership{}, err
-	}
 	tier = strings.ToUpper(strings.TrimSpace(tier))
 	if tier == "" {
 		tier = "FREE"
 	}
-	now := nowMillis()
-	_, err = s.db.ExecContext(ctx, s.rebind(`INSERT INTO memberships (user_id, tier, expires_at, updated_at, source) VALUES (?, ?, ?, ?, 'ADMIN') ON CONFLICT(user_id) DO UPDATE SET tier = excluded.tier, expires_at = excluded.expires_at, updated_at = excluded.updated_at, source = excluded.source`), userID, tier, expiresAt, now)
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return model.Membership{}, err
 	}
-	_, _ = s.db.ExecContext(ctx, s.rebind(`INSERT INTO membership_events (id, user_id, action, tier, old_expires_at, new_expires_at, source, actor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'ADMIN', ?, ?)`), ids.New("mev"), userID, action, tier, old.ExpiresAt, expiresAt, actorID, now)
+	defer tx.Rollback()
+	var old model.Membership
+	if err := tx.GetContext(ctx, &old, s.rebind(`SELECT * FROM memberships WHERE user_id = ?`), userID); err != nil && err != sql.ErrNoRows {
+		return model.Membership{}, err
+	}
+	now := nowMillis()
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO memberships (user_id, tier, expires_at, updated_at, source) VALUES (?, ?, ?, ?, 'ADMIN') ON CONFLICT(user_id) DO UPDATE SET tier = excluded.tier, expires_at = excluded.expires_at, updated_at = excluded.updated_at, source = excluded.source`), userID, tier, expiresAt, now); err != nil {
+		return model.Membership{}, err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO membership_events (id, user_id, action, tier, old_expires_at, new_expires_at, source, actor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'ADMIN', ?, ?)`), ids.New("mev"), userID, action, tier, old.ExpiresAt, expiresAt, actorID, now); err != nil {
+		return model.Membership{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Membership{}, err
+	}
 	return s.Membership(ctx, userID)
 }

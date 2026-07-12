@@ -252,13 +252,15 @@ func (s *Server) adminPublishRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDeleteRelease(w http.ResponseWriter, r *http.Request) {
-	item, err := s.store.DeleteRelease(r.Context(), r.PathValue("id"))
+	auditCtx := s.auditContext(r, principal(r).User.ID, "RELEASE_DELETE", "RELEASE", r.PathValue("id"), nil)
+	item, err := s.store.DeleteRelease(r.Context(), r.PathValue("id"), auditCtx)
 	if err != nil {
 		writeStoreError(w, r, err, "RELEASE")
 		return
 	}
-	_ = os.Remove(filepath.Join(s.cfg.ReleaseStorageDir, item.ArtifactStorageName))
-	s.audit(r, principal(r).User.ID, "RELEASE_DELETE", "RELEASE", item.ID, map[string]any{"versionCode": item.VersionCode})
+	if err := os.Remove(filepath.Join(s.cfg.ReleaseStorageDir, item.ArtifactStorageName)); err != nil && !os.IsNotExist(err) {
+		s.log.Warn("cleanup release artifact", "error", err, "releaseId", item.ID, "storageName", item.ArtifactStorageName)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -138,17 +138,28 @@ func (s *Store) PublishRelease(ctx context.Context, id string) (model.AppRelease
 	return s.Release(ctx, id)
 }
 
-func (s *Store) DeleteRelease(ctx context.Context, id string) (model.AppRelease, error) {
-	item, err := s.Release(ctx, id)
+func (s *Store) DeleteRelease(ctx context.Context, id string, audit AuditContext) (model.AppRelease, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return model.AppRelease{}, err
 	}
-	result, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM app_releases WHERE id = ?`), id)
+	defer tx.Rollback()
+	var item model.AppRelease
+	if err := tx.GetContext(ctx, &item, s.rebind(`SELECT * FROM app_releases WHERE id = ?`), id); err != nil {
+		return model.AppRelease{}, normalizeDBError(err)
+	}
+	result, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM app_releases WHERE id = ?`), id)
 	if err != nil {
 		return model.AppRelease{}, err
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return model.AppRelease{}, ErrNotFound
+	}
+	if err := s.auditInTx(ctx, tx, audit); err != nil {
+		return model.AppRelease{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.AppRelease{}, err
 	}
 	return item, nil
 }

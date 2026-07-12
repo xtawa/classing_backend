@@ -3,10 +3,26 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/xtawa/classing-backend/internal/ids"
 	"github.com/xtawa/classing-backend/internal/model"
 )
+
+// AuditContext carries the HTTP-level metadata needed to write an audit_logs
+// row inside a store transaction, without the store layer depending on
+// net/http.
+type AuditContext struct {
+	ActorID    string
+	Action     string
+	TargetType string
+	TargetID   string
+	RequestID  string
+	IPAddress  string
+	UserAgent  string
+	Metadata   map[string]any
+}
 
 type DashboardStats struct {
 	Users             int `json:"users"`
@@ -58,6 +74,21 @@ func (s *Store) Audit(ctx context.Context, item model.AuditLog) error {
 		item.Metadata = "{}"
 	}
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO audit_logs (id, actor_id, action, target_type, target_id, request_id, ip_address, user_agent, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), item.ID, item.ActorID, item.Action, item.TargetType, item.TargetID, item.RequestID, item.IPAddress, item.UserAgent, item.Metadata, item.CreatedAt)
+	return err
+}
+
+// auditInTx writes an audit_logs row within an ongoing transaction. The
+// caller is responsible for committing or rolling back the tx.
+func (s *Store) auditInTx(ctx context.Context, tx *sqlx.Tx, audit AuditContext) error {
+	metadata := `{}`
+	if audit.Metadata != nil {
+		encoded, err := json.Marshal(audit.Metadata)
+		if err != nil {
+			return err
+		}
+		metadata = string(encoded)
+	}
+	_, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO audit_logs (id, actor_id, action, target_type, target_id, request_id, ip_address, user_agent, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`), ids.New("aud"), audit.ActorID, audit.Action, audit.TargetType, audit.TargetID, audit.RequestID, audit.IPAddress, audit.UserAgent, metadata, nowMillis())
 	return err
 }
 
