@@ -95,3 +95,14 @@
 说明：
 - Android 最小周期按 15 分钟对齐。
 - 频率变更后客户端需重建 WorkManager 周期任务。
+
+## 9. 限流
+
+`PUT /api/v1/cloud/official/document` 受双维度限流保护：
+
+| 维度 | 限制 | 错误码 |
+|---|---|---|
+| IP（敏感接口共享） | 60 次/分钟 | `429 IP_RATE_LIMITED` |
+| 账户 | 30 次/分钟 | `429 ACCOUNT_RATE_LIMITED` |
+
+429 响应携带 `Retry-After: 60`。正常同步频率（≤ `EVERY_15_MIN`）远低于账户限制；若因并发冲突（409/412）触发自动重试，重试次数应 ≤ 3 并带退避。

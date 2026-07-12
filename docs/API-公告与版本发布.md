@@ -86,6 +86,7 @@ GET /api/v1/client/releases/{releaseId}/download
 - 返回准确的 `Content-Length`、APK MIME、`ETag`（SHA-256）。
 - 支持标准 HTTP `Range`，便于下载器恢复或分段读取。
 - 服务端在提供前校验磁盘文件大小与记录 `artifactSize` 一致，不一致返回 `409 RELEASE_ARTIFACT_MISMATCH`。
+- 限流：3 次/分钟/IP+路径，与公告查询、最新版本查询共享预算，超限返回 `429 CLIENT_RATE_LIMITED`（携带 `Retry-After: 60`）。不同 `releaseId` 各自独立计数。
 - 客户端下载完成后必须同时验证 `artifactSize` 与 `sha256`。
 
 ## 2. 管理员接口
@@ -177,3 +178,4 @@ MAX_RELEASE_ARTIFACT_BYTES=262144000
 - `RELEASE_VERSION_INVALID`
 - `RELEASE_CONFLICT`
 - `RELEASE_STORAGE_FAILED`
+- `CLIENT_RATE_LIMITED` — 公开接口（公告/版本查询/下载）超过 3 次/分钟/IP+路径（HTTP 429，携带 `Retry-After: 60`）

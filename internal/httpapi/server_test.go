@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/xtawa/classing-backend/internal/config"
+	"github.com/xtawa/classing-backend/internal/model"
 	"github.com/xtawa/classing-backend/internal/store"
 )
 
@@ -821,5 +822,191 @@ func TestRateLimiterBounded(t *testing.T) {
 	failLimiter.reset("alice")
 	if failLimiter.isLimited("alice") {
 		t.Fatal("isLimited should be false after reset")
+	}
+}
+
+// registerTestUser registers a user via the email verification flow and returns
+// the access token. Each test creates a fresh server, so the 20/min auth
+// rate limit easily covers the 2 calls per registration from 127.0.0.1.
+func registerTestUser(t *testing.T, client testClient, username, email, password string) string {
+	t.Helper()
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": username, "email": email, "password": password})
+	if status != http.StatusAccepted {
+		t.Fatalf("register %s: %d %+v", username, status, body)
+	}
+	challenge := body["challenge"].(map[string]any)
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/confirm", "", map[string]any{"challengeId": challenge["challengeId"], "verificationCode": body["devVerificationCode"]})
+	if status != http.StatusCreated {
+		t.Fatalf("confirm %s: %d %+v", username, status, body)
+	}
+	return body["session"].(map[string]any)["accessToken"].(string)
+}
+
+func TestSensitiveLimitMiddleware(t *testing.T) {
+	ipLim := newRateLimiterWithCap(2, time.Minute, 8)
+	acctLim := newRateLimiterWithCap(3, time.Minute, 8)
+	srv := &Server{}
+	handler := srv.sensitiveLimit(ipLim, acctLim)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+	serve := func(r *http.Request) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+
+	// IP dimension: 3rd request from same IP (unauthenticated) trips IP limiter.
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = "203.0.113.9:1234"
+		w := serve(r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("ip request %d: expected 200, got %d", i, w.Code)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.RemoteAddr = "203.0.113.9:1234"
+	w := serve(r)
+	if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") != "60" {
+		t.Fatalf("ip limit: expected 429 + Retry-After, got %d %+v", w.Code, w.Header())
+	}
+
+	// Account dimension: 4th request from same account trips account limiter.
+	// Uses a fresh IP each time so the IP limiter is not the bottleneck.
+	withPrincipal := func(userID, remoteAddr string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = remoteAddr
+		ctx := context.WithValue(r.Context(), principalKey{}, Principal{User: model.User{ID: userID}})
+		return r.WithContext(ctx)
+	}
+	for i := 0; i < 3; i++ {
+		req := withPrincipal("user-acct", fmt.Sprintf("198.51.100.%d:1234", i))
+		rr := serve(req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("account request %d: expected 200, got %d", i, rr.Code)
+		}
+	}
+	// 4th request from same account but fresh IP -> account limiter blocks.
+	req := withPrincipal("user-acct", "198.51.100.99:1234")
+	rr := serve(req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "60" {
+		t.Fatalf("account limit: expected 429 + Retry-After, got %d %+v", rr.Code, rr.Header())
+	}
+}
+
+func TestRedeemAccountRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	access := registerTestUser(t, client, "alice", "alice@redeem.test", "AlicePass123!")
+
+	// Rotating XFF so the IP limiter never trips; only the account dimension is exercised.
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("198.51.%d.%d", i/256, i%256)}
+	}
+	for i := 0; i < redeemAccountLimit; i++ {
+		status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/membership/redeem", access, map[string]any{"code": "INVALID"}, xff(i))
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("redeem %d unexpectedly rate limited", i)
+		}
+	}
+	status, body := client.requestWithHeaders(t, http.MethodPost, "/api/v1/membership/redeem", access, map[string]any{"code": "INVALID"}, xff(redeemAccountLimit))
+	if status != http.StatusTooManyRequests || body["code"] != "ACCOUNT_RATE_LIMITED" {
+		t.Fatalf("redeem after limit: expected 429 ACCOUNT_RATE_LIMITED, got %d %+v", status, body)
+	}
+}
+
+func TestBriefingTestAccountRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	access := registerTestUser(t, client, "bob", "bob@brief.test", "BobPass123!")
+
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("203.0.%d.%d", i/256, i%256)}
+	}
+	for i := 0; i < briefingTestAccountLimit; i++ {
+		status, _ := client.requestWithHeaders(t, http.MethodPost, "/api/v1/briefings/daily/test", access, map[string]any{"channel": "EMAIL"}, xff(i))
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("briefing test %d unexpectedly rate limited", i)
+		}
+	}
+	status, body := client.requestWithHeaders(t, http.MethodPost, "/api/v1/briefings/daily/test", access, map[string]any{"channel": "EMAIL"}, xff(briefingTestAccountLimit))
+	if status != http.StatusTooManyRequests || body["code"] != "ACCOUNT_RATE_LIMITED" {
+		t.Fatalf("briefing test after limit: expected 429 ACCOUNT_RATE_LIMITED, got %d %+v", status, body)
+	}
+}
+
+func TestCloudWriteAccountRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	access := registerTestUser(t, client, "carol", "carol@cloud.test", "CarolPass123!")
+
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("192.0.%d.%d", i/256, i%256)}
+	}
+	doc := map[string]any{"format": "classing_cloud_sync_v2", "updatedAt": 0, "records": map[string]any{}, "changes": []any{}, "devices": []any{}}
+	for i := 0; i < cloudWriteAccountLimit; i++ {
+		status, _ := client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, xff(i))
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("cloud write %d unexpectedly rate limited", i)
+		}
+	}
+	status, body := client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, xff(cloudWriteAccountLimit))
+	if status != http.StatusTooManyRequests || body["code"] != "ACCOUNT_RATE_LIMITED" {
+		t.Fatalf("cloud write after limit: expected 429 ACCOUNT_RATE_LIMITED, got %d %+v", status, body)
+	}
+}
+
+func TestAccountWriteRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	access := registerTestUser(t, client, "dave", "dave@acct.test", "DavePass123!")
+
+	xff := func(i int) map[string]string {
+		return map[string]string{"X-Forwarded-For": fmt.Sprintf("203.0.113.%d", i)}
+	}
+	// Wrong current password -> handler returns 403, but each request counts.
+	for i := 0; i < accountWriteAccountLimit; i++ {
+		status, _ := client.requestWithHeaders(t, http.MethodPut, "/api/v1/account/password", access, map[string]any{"currentPassword": "WrongPass99!", "newPassword": "NewPass99!"}, xff(i))
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("account write %d unexpectedly rate limited", i)
+		}
+	}
+	status, body := client.requestWithHeaders(t, http.MethodPut, "/api/v1/account/password", access, map[string]any{"currentPassword": "WrongPass99!", "newPassword": "NewPass99!"}, xff(accountWriteAccountLimit))
+	if status != http.StatusTooManyRequests || body["code"] != "ACCOUNT_RATE_LIMITED" {
+		t.Fatalf("account write after limit: expected 429 ACCOUNT_RATE_LIMITED, got %d %+v", status, body)
+	}
+}
+
+func TestSensitiveIPRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	// Same IP (127.0.0.1, no XFF) across multiple accounts so the account
+	// dimension is not the bottleneck. Each account stays under its own cap.
+	accesses := make([]string, 0, sensitiveIPLimit/accountWriteAccountLimit+1)
+	for i := 0; i < sensitiveIPLimit/accountWriteAccountLimit+1; i++ {
+		accesses = append(accesses, registerTestUser(t, client, fmt.Sprintf("ip%d", i), fmt.Sprintf("ip%d@ip.test", i), "IpPass123!"))
+	}
+	// Fire sensitiveIPLimit requests from the same IP, round-robin across accounts.
+	idx := 0
+	for i := 0; i < sensitiveIPLimit; i++ {
+		status, _ := client.request(t, http.MethodPut, "/api/v1/account/password", accesses[idx], map[string]any{"currentPassword": "WrongPass99!", "newPassword": "NewPass99!"})
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("ip request %d unexpectedly rate limited", i)
+		}
+		idx = (idx + 1) % len(accesses)
+	}
+	// Next request from the same IP should trip the shared IP limiter.
+	status, body := client.request(t, http.MethodPut, "/api/v1/account/password", accesses[0], map[string]any{"currentPassword": "WrongPass99!", "newPassword": "NewPass99!"})
+	if status != http.StatusTooManyRequests || body["code"] != "IP_RATE_LIMITED" {
+		t.Fatalf("ip limit: expected 429 IP_RATE_LIMITED, got %d %+v", status, body)
+	}
+}
+
+func TestPublicDownloadRateLimit(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, nil)
+	for i := 0; i < 3; i++ {
+		status, _ := client.request(t, http.MethodGet, "/api/v1/client/releases/any-id/download", "", nil)
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("download %d unexpectedly rate limited", i)
+		}
+	}
+	status, body := client.request(t, http.MethodGet, "/api/v1/client/releases/any-id/download", "", nil)
+	if status != http.StatusTooManyRequests || body["code"] != "CLIENT_RATE_LIMITED" {
+		t.Fatalf("download after limit: expected 429 CLIENT_RATE_LIMITED, got %d %+v", status, body)
 	}
 }

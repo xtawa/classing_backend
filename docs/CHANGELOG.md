@@ -1,5 +1,75 @@
 # Changelog
 
+## 2026-07-12 · 请求头长度限制与安全头/CORS/超时测试补全
+
+### Changed
+
+- `X-Request-ID` 客户端传入值超过 128 字节时，服务端忽略该值并生成新的 `req_` 前缀 ID，防止超长值污染日志、上下文与错误响应（`internal/httpapi/middleware.go`）。128 字节以内的值仍原样回显。
+- `Idempotency-Key` 客户端传入值超过 128 字节时，`PUT /api/v1/cloud/official/document` 返回 `400 IDEMPOTENCY_KEY_TOO_LONG`，防止超长 key 写入 `idempotency_keys` 表导致存储膨胀（`internal/httpapi/handlers_cloud.go`）。
+- 新增 `maxHeaderIDLen = 128` 常量，统一约束两个客户端标识头长度。
+
+### Added
+
+- 新增 `internal/httpapi/middleware_test.go`（8 个测试）：安全头存在性（CSP/HSTS/nosniff/Referrer/Permissions-Policy）、HSTS 仅在 `X-Forwarded-Proto: https` 时下发、CORS 允许源反射与拒绝、CORS 预检 OPTIONS → 204、4 MiB JSON body 上限、X-Request-ID 长度限制、Idempotency-Key 长度限制。
+
+### Affected Endpoints
+
+| 路由 | 变更 | 新增错误码 |
+|---|---|---|
+| 所有路由 | `X-Request-ID` > 128 字节时静默替换为生成值 | — |
+| `PUT /api/v1/cloud/official/document` | `Idempotency-Key` > 128 字节时拒绝 | `400 IDEMPOTENCY_KEY_TOO_LONG` |
+
+### Client Impact
+
+- **影响端**：Android Mobile、Android Wear、Web Admin。
+- 使用 UUID（36 字符）作为 `Idempotency-Key` 的客户端不受影响；128 字节上限覆盖 UUID、nanoid 等所有常见标识格式。
+- `X-Request-ID` 变更对客户端透明：无论客户端是否发送、发送多长，响应始终携带有效的 `X-Request-ID`。
+- 客户端适配详情见 [WearOS CHANGELOG](../../WearOS_ClassingTimeTable/docs/CHANGELOG.md)。
+
+### Verified
+
+- `go test ./internal/httpapi/` 全绿（含 8 个新增测试与既有回归测试）。
+- `go vet ./internal/httpapi/` 无警告。
+
+## 2026-07-12 · 敏感接口限流：账户维度与 IP 维度
+
+### Changed
+
+- 兑换、简报测试、官方云写入、每日简报配置变更、密码修改与邮箱变更确认等敏感写接口新增双维度限流：IP 维度（60 次/分钟/IP，敏感接口共享）与账户维度（5–30 次/分钟/账户，按接口风险分级）。超限分别返回 `429 IP_RATE_LIMITED` 或 `429 ACCOUNT_RATE_LIMITED`，并携带 `Retry-After: 60`。
+- 公开下载接口 `GET /api/v1/client/releases/{id}/download` 纳入公共客户端限流（3 次/分钟/IP+路径），与公告查询、最新版本查询共享限流策略与 `CLIENT_RATE_LIMITED` 错误码。
+- 新增 `sensitiveLimit` 中间件（`internal/httpapi/middleware.go`），在 `requireAuth` 之后执行，同时校验 IP 与账户两个维度；账户键为 `user:<userId>`，IP 轮换无法绕过账户维度限流。
+
+### Added
+
+- 新增 5 个限流器（`internal/httpapi/server.go`）：`sensitiveIPLimiter`（60/min/IP）、`redeemAccountLimiter`（10/min/account）、`briefingTestAccountLimiter`（5/min/account）、`cloudWriteAccountLimiter`（30/min/account）、`accountWriteAccountLimiter`（10/min/account）。均复用 `rateLimiter` 类型，受 8192 上限与 TTL/LRU 驱逐约束。
+- 新增 7 个限流回归测试（`internal/httpapi/server_test.go`）：中间件单元测试（IP+账户双维度）、兑换/简报测试/云写入/账户写入账户维度测试、敏感接口 IP 维度测试、公共下载限流测试。
+
+### Affected Endpoints
+
+| 路由 | IP 限制 | 账户限制 | 新增错误码 |
+|---|---|---|---|
+| `POST /api/v1/membership/redeem` | 60/min | 10/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `POST /api/v1/briefings/daily/test` | 60/min | 5/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `PUT /api/v1/cloud/official/document` | 60/min | 30/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `PUT /api/v1/briefings/daily` | 60/min | 30/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `DELETE /api/v1/briefings/daily` | 60/min | 30/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `PATCH /api/v1/account/me` | 60/min | 10/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `PUT /api/v1/account/password` | 60/min | 10/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `POST /api/v1/account/email/confirm` | 60/min | 10/min | `IP_RATE_LIMITED` / `ACCOUNT_RATE_LIMITED` |
+| `GET /api/v1/client/releases/{id}/download` | 3/min/IP+路径 | — | `CLIENT_RATE_LIMITED` |
+
+### Client Impact
+
+- **影响端**：Android Mobile、Android Wear、Web Admin。
+- 上述接口超限时返回 429 并携带 `Retry-After: 60`，客户端应按该值退避，不应立即重试。
+- 下载接口 3 次/分钟限制与公告/版本查询共享预算，客户端下载失败重试应指数退避。
+- 客户端适配详情见 [客户端影响-敏感接口限流.md](../../WearOS_ClassingTimeTable/docs/客户端影响-敏感接口限流.md)。
+
+### Verified
+
+- `go build ./...` 与 `go vet ./...` 通过。
+- `go test ./internal/httpapi/...` 全绿（含 7 个新增测试与既有回归测试）；`TestForgedXFFRateLimitBypass`、`TestLoginIdentifierRateLimit`、`TestVerificationCodeBruteForceCap`、`TestRateLimiterBounded` 等既有测试未受影响。
+
 ## 2026-07-12 · 版本发布流程缺口复核
 
 ### Reviewed

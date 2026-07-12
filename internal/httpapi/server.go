@@ -12,28 +12,38 @@ import (
 )
 
 type Server struct {
-	cfg              config.Config
-	store            *store.Store
-	tokens           *auth.Manager
-	web              fs.FS
-	log              *slog.Logger
-	limiter          *rateLimiter
-	publicLimiter    *rateLimiter
-	loginFailLimiter *rateLimiter
-	refreshReplays   *refreshReplayCache
+	cfg                        config.Config
+	store                      *store.Store
+	tokens                     *auth.Manager
+	web                        fs.FS
+	log                        *slog.Logger
+	limiter                    *rateLimiter
+	publicLimiter              *rateLimiter
+	loginFailLimiter           *rateLimiter
+	sensitiveIPLimiter         *rateLimiter
+	redeemAccountLimiter       *rateLimiter
+	briefingTestAccountLimiter *rateLimiter
+	cloudWriteAccountLimiter   *rateLimiter
+	accountWriteAccountLimiter *rateLimiter
+	refreshReplays             *refreshReplayCache
 }
 
 func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *Server {
 	return &Server{
-		cfg:              cfg,
-		store:            data,
-		tokens:           auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL),
-		web:              web,
-		log:              logger,
-		limiter:          newRateLimiter(20, time.Minute),
-		publicLimiter:    newRateLimiter(3, time.Minute),
-		loginFailLimiter: newRateLimiter(loginFailureLimit, loginFailureWindow),
-		refreshReplays:   newRefreshReplayCache(5 * time.Second),
+		cfg:                        cfg,
+		store:                      data,
+		tokens:                     auth.NewManager(cfg.JWTSecret, cfg.AccessTokenTTL),
+		web:                        web,
+		log:                        logger,
+		limiter:                    newRateLimiter(20, time.Minute),
+		publicLimiter:              newRateLimiter(3, time.Minute),
+		loginFailLimiter:           newRateLimiter(loginFailureLimit, loginFailureWindow),
+		sensitiveIPLimiter:         newRateLimiter(sensitiveIPLimit, time.Minute),
+		redeemAccountLimiter:       newRateLimiter(redeemAccountLimit, time.Minute),
+		briefingTestAccountLimiter: newRateLimiter(briefingTestAccountLimit, time.Minute),
+		cloudWriteAccountLimiter:   newRateLimiter(cloudWriteAccountLimit, time.Minute),
+		accountWriteAccountLimiter: newRateLimiter(accountWriteAccountLimit, time.Minute),
+		refreshReplays:             newRefreshReplayCache(5 * time.Second),
 	}
 }
 
@@ -44,7 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.Handle("GET /api/v1/client/announcements", s.publicClientRateLimit(http.HandlerFunc(s.publicAnnouncements)))
 	mux.Handle("GET /api/v1/client/releases/latest", s.publicClientRateLimit(http.HandlerFunc(s.publicLatestRelease)))
-	mux.HandleFunc("GET /api/v1/client/releases/{id}/download", s.publicDownloadRelease)
+	mux.Handle("GET /api/v1/client/releases/{id}/download", s.publicClientRateLimit(http.HandlerFunc(s.publicDownloadRelease)))
 
 	mux.Handle("POST /api/v1/auth/register", s.authRateLimit(http.HandlerFunc(s.register)))
 	mux.HandleFunc("GET /api/v1/auth/registration/config", s.registrationConfig)
@@ -57,12 +67,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("POST /api/v1/auth/logout", s.requireAuth(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/account/me", s.requireAuth(http.HandlerFunc(s.accountMe)))
-	mux.Handle("PATCH /api/v1/account/me", s.requireAuth(http.HandlerFunc(s.updateAccount)))
-	mux.Handle("POST /api/v1/account/email/confirm", s.requireAuth(http.HandlerFunc(s.confirmEmailChange)))
-	mux.Handle("PUT /api/v1/account/password", s.requireAuth(http.HandlerFunc(s.changePassword)))
+	mux.Handle("PATCH /api/v1/account/me", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.updateAccount))))
+	mux.Handle("POST /api/v1/account/email/confirm", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.confirmEmailChange))))
+	mux.Handle("PUT /api/v1/account/password", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.changePassword))))
 
 	mux.Handle("GET /api/v1/membership/status", s.requireAuth(http.HandlerFunc(s.membershipStatus)))
-	mux.Handle("POST /api/v1/membership/redeem", s.requireAuth(http.HandlerFunc(s.redeemMembership)))
+	mux.Handle("POST /api/v1/membership/redeem", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.redeemAccountLimiter)(http.HandlerFunc(s.redeemMembership))))
 
 	mux.Handle("GET /api/v1/timetables", s.requireAuth(http.HandlerFunc(s.listTimetables)))
 	mux.Handle("POST /api/v1/timetables", s.requireAuth(http.HandlerFunc(s.createTimetable)))
@@ -74,13 +84,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/cloud/official/test", s.requireAuth(http.HandlerFunc(s.cloudPing)))
 	mux.Handle("GET /api/v1/cloud/official/config", s.requireAuth(http.HandlerFunc(s.cloudConfig)))
 	mux.Handle("GET /api/v1/cloud/official/document", s.requireAuth(http.HandlerFunc(s.getCloudDocument)))
-	mux.Handle("PUT /api/v1/cloud/official/document", s.requireAuth(http.HandlerFunc(s.putCloudDocument)))
+	mux.Handle("PUT /api/v1/cloud/official/document", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.cloudWriteAccountLimiter)(http.HandlerFunc(s.putCloudDocument))))
 	mux.Handle("GET /api/v1/cloud/official/events", s.requireAuth(http.HandlerFunc(s.cloudEvents)))
 
 	mux.Handle("GET /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.getBriefing)))
-	mux.Handle("PUT /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.putBriefing)))
-	mux.Handle("DELETE /api/v1/briefings/daily", s.requireAuth(http.HandlerFunc(s.deleteBriefing)))
-	mux.Handle("POST /api/v1/briefings/daily/test", s.requireAuth(http.HandlerFunc(s.testBriefingV2)))
+	mux.Handle("PUT /api/v1/briefings/daily", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.cloudWriteAccountLimiter)(http.HandlerFunc(s.putBriefing))))
+	mux.Handle("DELETE /api/v1/briefings/daily", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.cloudWriteAccountLimiter)(http.HandlerFunc(s.deleteBriefing))))
+	mux.Handle("POST /api/v1/briefings/daily/test", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.briefingTestAccountLimiter)(http.HandlerFunc(s.testBriefingV2))))
 
 	mux.Handle("GET /api/v1/admin/dashboard", s.requireAdmin(http.HandlerFunc(s.adminDashboard)))
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(http.HandlerFunc(s.adminListUsers)))

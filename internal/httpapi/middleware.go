@@ -16,6 +16,20 @@ import (
 
 const defaultMaxRateEntries = 8192
 
+// Sensitive endpoint rate limits. IP dimension is shared across all sensitive
+// endpoints; account dimension is per-category to match legitimate usage.
+const (
+	sensitiveIPLimit         = 60 // per IP per minute across all sensitive endpoints
+	redeemAccountLimit       = 10 // per account per minute for redemption
+	briefingTestAccountLimit = 5  // per account per minute for briefing test dispatch
+	cloudWriteAccountLimit   = 30 // per account per minute for cloud writes & briefing config
+	accountWriteAccountLimit = 10 // per account per minute for password/email change
+)
+
+// maxHeaderIDLen caps client-supplied identifier headers (X-Request-ID,
+// Idempotency-Key) to prevent memory/log/DB bloat from oversized values.
+const maxHeaderIDLen = 128
+
 type rateWindow struct {
 	started time.Time
 	count   int
@@ -162,11 +176,36 @@ func (s *Server) publicClientRateLimit(next http.Handler) http.Handler {
 	})
 }
 
+// sensitiveLimit enforces IP + account rate limits on authenticated sensitive
+// endpoints. Must be wrapped by requireAuth so the principal is available.
+// Either limiter may be nil to skip that dimension.
+func (s *Server) sensitiveLimit(ipLimiter, accountLimiter *rateLimiter) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ipLimiter != nil && !ipLimiter.allow(s.clientIP(r)) {
+				w.Header().Set("Retry-After", "60")
+				writeError(w, r, http.StatusTooManyRequests, "IP_RATE_LIMITED", "too many requests from this IP")
+				return
+			}
+			if accountLimiter != nil {
+				if p := principal(r); p.User.ID != "" {
+					if !accountLimiter.allow("user:" + p.User.ID) {
+						w.Header().Set("Retry-After", "60")
+						writeError(w, r, http.StatusTooManyRequests, "ACCOUNT_RATE_LIMITED", "too many requests from this account")
+						return
+					}
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		id := r.Header.Get("X-Request-ID")
-		if strings.TrimSpace(id) == "" {
+		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if id == "" || len(id) > maxHeaderIDLen {
 			id = ids.New("req")
 		}
 		ctx := context.WithValue(r.Context(), requestIDKey{}, id)

@@ -114,6 +114,10 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(idempotencyKey) > maxHeaderIDLen {
+		writeError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_TOO_LONG", "idempotency key must be at most 128 characters")
+		return
+	}
 	requestHash := store.HashRequest(payload)
 	if idempotencyKey != "" {
 		if record, err := s.store.Idempotency(r.Context(), userID, idempotencyKey); err == nil {
