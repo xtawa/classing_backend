@@ -12,6 +12,10 @@ func validPlatform(value string) bool {
 	return value == model.ReleasePlatformMobile || value == model.ReleasePlatformWear
 }
 
+func validChannel(value string) bool {
+	return value == model.ReleaseChannelStable || value == model.ReleaseChannelBeta
+}
+
 func normalizeChannel(value string) string {
 	value = strings.ToUpper(strings.TrimSpace(value))
 	if value == "" {
@@ -106,7 +110,7 @@ func (s *Store) CreateRelease(ctx context.Context, item model.AppRelease) (model
 	item.Channel = normalizeChannel(item.Channel)
 	item.VersionName = strings.TrimSpace(item.VersionName)
 	item.Title = strings.TrimSpace(item.Title)
-	if item.ID == "" || !validPlatform(item.Platform) || item.VersionCode < 1 || item.VersionName == "" || item.Title == "" || item.ArtifactStorageName == "" || item.ArtifactSize < 1 || item.ArtifactSHA256 == "" {
+	if item.ID == "" || !validPlatform(item.Platform) || !validChannel(item.Channel) || item.VersionCode < 1 || item.MinSupportedVersionCode < 0 || item.VersionName == "" || item.Title == "" || item.ArtifactStorageName == "" || item.ArtifactSize < 1 || item.ArtifactSHA256 == "" {
 		return model.AppRelease{}, ErrInvalid
 	}
 	if item.Mandatory != 0 {

@@ -137,4 +137,5 @@ const (
 	ReleasePlatformMobile  = "ANDROID_MOBILE"
 	ReleasePlatformWear    = "ANDROID_WEAR"
 	ReleaseChannelStable   = "STABLE"
+	ReleaseChannelBeta     = "BETA"
 )

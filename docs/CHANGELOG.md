@@ -20,11 +20,13 @@
   - **channel**：`checkLatest` 硬编码 `channel=STABLE`（L100），不会发送未知渠道 →「channel 未限制」对客户端不可达。
   - **minSupportedVersionCode**：仅解析入 `AppUpdateRelease` 字段（L202），`checkLatest` 与 UI 均未用于强制升级门禁 → 负值被忽略。
 
-### Backend Hardening (Proposed, not yet applied)
-- `CreateRelease`：渠道白名单（`STABLE` / `BETA`）+ `MinSupportedVersionCode ≥ 0` 校验。
-- `adminPublishRelease`：发布前 stat + 大小 + SHA-256 复核磁盘文件，不匹配则拒绝发布（发布为管理员低频操作，重哈希成本可接受）。
-- `publicDownloadRelease`：提供前校验实际文件大小 == 记录 `ArtifactSize`（廉价防线，每请求仅一次 stat）；完整哈希复核由客户端 SHA-256 兜底，不在下载路径重算。
-- `adminDeleteRelease`：**保持 DB-first 顺序**（允许在途下载完成，避免 broken release 暴露给客户端）；孤儿文件清理失败建议后续引入 reaper / 管理端清理工具，而非重排为 file-first（会中断在途下载、损害客户端体验）。
+### Backend Hardening (Applied)
+- `CreateRelease`（`internal/store/releases.go`）：新增 `validChannel` 白名单（`STABLE` / `BETA`），未知渠道返回 `ErrInvalid`；`MinSupportedVersionCode < 0` 返回 `ErrInvalid`。
+- `adminPublishRelease`（`internal/httpapi/handlers_releases.go`）：发布前调用新增 `verifyReleaseArtifact` 重新 stat + 大小 + SHA-256 复核磁盘文件，与记录不一致返回 `409 RELEASE_ARTIFACT_MISMATCH` 且不翻转状态。
+- `publicDownloadRelease`：提供前校验实际文件大小 == 记录 `ArtifactSize`，不一致返回 `409 RELEASE_ARTIFACT_MISMATCH`（每请求一次 stat，廉价防线；完整哈希复核仍由客户端 SHA-256 兜底，不在下载路径重算）。
+- `adminDeleteRelease`：**保持 DB-first 顺序不变**（允许在途下载完成，避免 broken release 暴露给客户端）；孤儿文件清理失败为已知存储泄漏，建议后续引入 reaper / 管理端清理工具，而非重排为 file-first（会中断在途下载、损害客户端体验）。
+- `docs/API-公告与版本发布.md`：补充 `channel` 白名单、`minSupportedVersionCode` 非负、发布复核与下载大小校验的契约说明，新增 `RELEASE_ARTIFACT_MISMATCH` 错误码。
+- `go build ./...` 与 `go vet ./...` 通过。
 
 ## 2026-07-12 · 数据库迁移测试与事务一致性修复
 

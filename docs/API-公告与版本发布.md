@@ -85,6 +85,7 @@ GET /api/v1/client/releases/{releaseId}/download
 - 仅允许下载 `PUBLISHED` 版本。
 - 返回准确的 `Content-Length`、APK MIME、`ETag`（SHA-256）。
 - 支持标准 HTTP `Range`，便于下载器恢复或分段读取。
+- 服务端在提供前校验磁盘文件大小与记录 `artifactSize` 一致，不一致返回 `409 RELEASE_ARTIFACT_MISMATCH`。
 - 客户端下载完成后必须同时验证 `artifactSize` 与 `sha256`。
 
 ## 2. 管理员接口
@@ -126,10 +127,10 @@ Content-Type: multipart/form-data
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `platform` | 是 | `ANDROID_MOBILE` 或 `ANDROID_WEAR` |
-| `channel` | 是 | 默认 `STABLE`，也可使用 `BETA` |
+| `channel` | 是 | `STABLE`（默认）或 `BETA`，其他值被拒绝 |
 | `versionCode` | 是 | 正整数，同平台同渠道唯一 |
 | `versionName` | 是 | 展示版本，例如 `1.0.5` |
-| `minSupportedVersionCode` | 否 | 最低支持版本代码 |
+| `minSupportedVersionCode` | 否 | 最低支持版本代码，不得为负 |
 | `title` | 是 | 更新标题 |
 | `changelog` | 否 | 更新说明 |
 | `mandatory` | 否 | 是否标记为必须更新 |
@@ -151,7 +152,7 @@ Content-Type: multipart/form-data
 - `POST /api/v1/admin/releases/{id}/publish`
 - `DELETE /api/v1/admin/releases/{id}`
 
-删除版本会同时删除数据库记录和服务端 APK 文件。发布、上传、删除和公告变更都会进入审计日志。
+发布前服务端会重新校验磁盘文件的存在性、大小与 SHA-256，与记录不一致时返回 `409 RELEASE_ARTIFACT_MISMATCH` 且不改变发布状态。删除版本会先删除数据库记录（事务），再 best-effort 删除 APK 文件；文件清理失败会产生孤儿文件，但不影响数据库一致性。发布、上传、删除和公告变更都会进入审计日志。
 
 ## 3. 存储与限制
 
@@ -172,6 +173,7 @@ MAX_RELEASE_ARTIFACT_BYTES=262144000
 - `RELEASE_UPLOAD_INVALID`
 - `RELEASE_ARTIFACT_REQUIRED`
 - `RELEASE_ARTIFACT_INVALID`
+- `RELEASE_ARTIFACT_MISMATCH`
 - `RELEASE_VERSION_INVALID`
 - `RELEASE_CONFLICT`
 - `RELEASE_STORAGE_FAILED`

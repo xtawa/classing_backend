@@ -74,6 +74,10 @@ func (s *Server) publicDownloadRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "RELEASE_ARTIFACT_FAILED", "release artifact could not be read")
 		return
 	}
+	if info.Size() != item.ArtifactSize {
+		writeError(w, r, http.StatusConflict, "RELEASE_ARTIFACT_MISMATCH", "release artifact does not match recorded metadata")
+		return
+	}
 	w.Header().Set("Content-Type", item.ArtifactMimeType)
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": item.ArtifactFileName}))
 	w.Header().Set("ETag", `"`+item.ArtifactSHA256+`"`)
@@ -242,13 +246,22 @@ func (s *Server) adminUploadRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminPublishRelease(w http.ResponseWriter, r *http.Request) {
-	item, err := s.store.PublishRelease(r.Context(), r.PathValue("id"))
+	item, err := s.store.Release(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, r, err, "RELEASE")
 		return
 	}
-	s.audit(r, principal(r).User.ID, "RELEASE_PUBLISH", "RELEASE", item.ID, map[string]any{"versionCode": item.VersionCode})
-	writeJSON(w, http.StatusOK, map[string]any{"release": releasePayload(item)})
+	if err := verifyReleaseArtifact(s.cfg.ReleaseStorageDir, &item); err != nil {
+		writeError(w, r, http.StatusConflict, "RELEASE_ARTIFACT_MISMATCH", err.Error())
+		return
+	}
+	published, err := s.store.PublishRelease(r.Context(), item.ID)
+	if err != nil {
+		writeStoreError(w, r, err, "RELEASE")
+		return
+	}
+	s.audit(r, principal(r).User.ID, "RELEASE_PUBLISH", "RELEASE", published.ID, map[string]any{"versionCode": published.VersionCode})
+	writeJSON(w, http.StatusOK, map[string]any{"release": releasePayload(published)})
 }
 
 func (s *Server) adminDeleteRelease(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +289,29 @@ func validAPK(path string) bool {
 		}
 	}
 	return false
+}
+
+func verifyReleaseArtifact(storageDir string, item *model.AppRelease) error {
+	file, err := os.Open(filepath.Join(storageDir, item.ArtifactStorageName))
+	if err != nil {
+		return errors.New("release artifact is missing on disk")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return errors.New("release artifact could not be read")
+	}
+	if info.Size() != item.ArtifactSize {
+		return errors.New("release artifact size does not match record")
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return errors.New("release artifact could not be hashed")
+	}
+	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), item.ArtifactSHA256) {
+		return errors.New("release artifact checksum does not match record")
+	}
+	return nil
 }
 
 func announcementPayload(item model.Announcement) map[string]any {
