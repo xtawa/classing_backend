@@ -38,6 +38,37 @@ func TestLoadDefaultsAllowedOriginFromPublicBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsLegalAgreementURLs(t *testing.T) {
+	t.Setenv("PUBLIC_BASE_URL", "https://api-classing.underflo.ink")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LegalPrivacyURL != defaultLegalAgreementURL {
+		t.Fatalf("LegalPrivacyURL = %q", cfg.LegalPrivacyURL)
+	}
+	if cfg.LegalTermsURL != defaultLegalAgreementURL {
+		t.Fatalf("LegalTermsURL = %q", cfg.LegalTermsURL)
+	}
+	if cfg.LegalCrossBorderURL != defaultLegalAgreementURL {
+		t.Fatalf("LegalCrossBorderURL = %q", cfg.LegalCrossBorderURL)
+	}
+}
+
+func TestLoadKeepsExplicitLegalAgreementURLs(t *testing.T) {
+	t.Setenv("PUBLIC_BASE_URL", "https://api-classing.underflo.ink")
+	t.Setenv("LEGAL_PRIVACY_URL", "https://legal.example/privacy")
+	t.Setenv("LEGAL_TERMS_URL", "https://legal.example/terms")
+	t.Setenv("LEGAL_CROSS_BORDER_URL", "https://legal.example/cross-border-transfer")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LegalPrivacyURL != "https://legal.example/privacy" || cfg.LegalTermsURL != "https://legal.example/terms" || cfg.LegalCrossBorderURL != "https://legal.example/cross-border-transfer" {
+		t.Fatalf("legal URLs not preserved: %#v", cfg)
+	}
+}
+
 func TestLoadKeepsExplicitAllowedOrigins(t *testing.T) {
 	t.Setenv("PUBLIC_BASE_URL", "https://api-classing.underflo.ink")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "https://console.example.com, https://ops.example.com")

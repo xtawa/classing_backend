@@ -42,10 +42,13 @@ type Config struct {
 	LegalCrossBorderURL    string
 }
 
+const defaultLegalAgreementURL = "https://lyxyy.notion.site/classing-user-policy"
+
 func Load() (Config, error) {
 	if err := validateExplicitValues(); err != nil {
 		return Config{}, err
 	}
+	publicBaseURL := strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/")
 	cfg := Config{
 		Environment:            env("APP_ENV", "development"),
 		HTTPAddr:               env("HTTP_ADDR", ":8080"),
@@ -63,13 +66,13 @@ func Load() (Config, error) {
 		TurnstileSecret:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET")),
 		TurnstileRequired:      boolean("TURNSTILE_REQUIRED", false),
 		MaxCloudDocumentSize:   int64(integer("MAX_CLOUD_DOCUMENT_BYTES", 2*1024*1024)),
-		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+		PublicBaseURL:          publicBaseURL,
 		SchedulerEnabled:       boolean("SCHEDULER_ENABLED", true),
 		ReleaseStorageDir:      env("RELEASE_STORAGE_DIR", "data/releases"),
 		MaxReleaseArtifactSize: int64(integer("MAX_RELEASE_ARTIFACT_BYTES", 250*1024*1024)),
-		LegalPrivacyURL:        strings.TrimSpace(os.Getenv("LEGAL_PRIVACY_URL")),
-		LegalTermsURL:          strings.TrimSpace(os.Getenv("LEGAL_TERMS_URL")),
-		LegalCrossBorderURL:    strings.TrimSpace(os.Getenv("LEGAL_CROSS_BORDER_URL")),
+		LegalPrivacyURL:        legalAgreementURL(os.Getenv("LEGAL_PRIVACY_URL")),
+		LegalTermsURL:          legalAgreementURL(os.Getenv("LEGAL_TERMS_URL")),
+		LegalCrossBorderURL:    legalAgreementURL(os.Getenv("LEGAL_CROSS_BORDER_URL")),
 	}
 
 	cfg.DatabaseDriver = strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
@@ -140,6 +143,13 @@ func validateOptionalURL(key, value string) error {
 		return fmt.Errorf("%s must use http or https", key)
 	}
 	return nil
+}
+
+func legalAgreementURL(explicit string) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	return defaultLegalAgreementURL
 }
 
 func defaultAllowedOrigins(explicit []string, publicBaseURL string) []string {

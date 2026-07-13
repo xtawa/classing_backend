@@ -14,9 +14,9 @@
   "turnstileSiteKey": "0x4...",
   "emailVerificationRequired": true,
   "legalAgreementUrls": {
-    "privacyPolicy": "https://example.com/privacy",
-    "termsOfService": "https://example.com/terms",
-    "crossBorderTransfer": "https://example.com/cross-border-transfer"
+    "privacyPolicy": "https://lyxyy.notion.site/classing-user-policy",
+    "termsOfService": "https://lyxyy.notion.site/classing-user-policy",
+    "crossBorderTransfer": "https://lyxyy.notion.site/classing-user-policy"
   }
 }
 ```

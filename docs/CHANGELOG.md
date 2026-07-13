@@ -18,7 +18,7 @@
 ### Added
 
 - 新增 `POST /api/v1/account/delete`，要求当前密码与二次确认文本，成功后软删除账户并撤销该账户全部设备会话。
-- `GET /api/v1/auth/registration/config` 新增 `legalAgreementUrls`，由 `LEGAL_PRIVACY_URL`、`LEGAL_TERMS_URL`、`LEGAL_CROSS_BORDER_URL` 配置。
+- `GET /api/v1/auth/registration/config` 新增 `legalAgreementUrls`，由 `LEGAL_PRIVACY_URL`、`LEGAL_TERMS_URL`、`LEGAL_CROSS_BORDER_URL` 配置；未配置时三项均回落到 `https://lyxyy.notion.site/classing-user-policy`。
 - Web 登录、邮箱注册申请和邮箱注册确认必须携带三项协议同意；缺失或未全选返回 `400 AUTH_CONSENT_REQUIRED`。
 
 ### Changed

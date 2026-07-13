@@ -55,7 +55,7 @@
 说明：
 - `identifier` 可为邮箱或用户名。
 - `consent` 对登录和邮箱注册流程均必需；三项协议未全部同意时返回 `400 AUTH_CONSENT_REQUIRED`。
-- 协议链接由 `GET /api/v1/auth/registration/config` 的 `legalAgreementUrls` 下发，对应 `LEGAL_PRIVACY_URL`、`LEGAL_TERMS_URL`、`LEGAL_CROSS_BORDER_URL`。
+- 协议链接由 `GET /api/v1/auth/registration/config` 的 `legalAgreementUrls` 下发，对应 `LEGAL_PRIVACY_URL`、`LEGAL_TERMS_URL`、`LEGAL_CROSS_BORDER_URL`；未配置时三项均回落到 `https://lyxyy.notion.site/classing-user-policy`。
 
 ## 4. 刷新 Token
 
