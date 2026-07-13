@@ -129,11 +129,10 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
-	remote := remoteAddrIP(r.RemoteAddr)
-	if remote != "127.0.0.1" && remote != "::1" {
-		writeError(w, r, http.StatusForbidden, "METRICS_LOCAL_ONLY", "metrics are available only from localhost")
-		return
-	}
+	// Network access is restricted by the loopback-only Compose port binding and
+	// the Nginx allow/deny rule. A host request reaches the container through the
+	// Docker bridge, so checking RemoteAddr for loopback here would reject the
+	// legitimate local proxy as well.
 	databaseUp := 1
 	if err := s.store.Ping(r.Context()); err != nil {
 		databaseUp = 0
