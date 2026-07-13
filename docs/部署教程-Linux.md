@@ -119,11 +119,11 @@ EXPOSE_VERIFICATION_CODE=false
 
 ### 2.2.1 Lark 公共邮箱 SMTP 配置
 
-在 Lark Admin 为公共邮箱开启 IMAP/SMTP 后，管理台“邮件与任务”页面选择 Lark 预设即可自动填入：
+在 Lark Admin 为公共邮箱开启 IMAP/SMTP 后，管理台“邮件与任务”页面选择 Lark 预设即可自动填入。默认推荐 `587 STARTTLS`，因为部分云主机可能限制 `465` 出站连接：
 
 - SMTP Host：`smtp.larksuite.com`
-- SSL 端口：`465`
-- STARTTLS 端口：`587`
+- STARTTLS 端口：`587`（默认）
+- SSL 端口：`465`（可选）
 - 用户名：公共邮箱完整地址，例如 `noreply-classing@zcwww.cc`
 - 发件地址：同公共邮箱完整地址
 - 密码 Secret 引用：默认 `env:CLASSING_SMTP_PASSWORD`；如需独立变量，可改为 `env:LARK_SMTP_PASSWORD`
