@@ -94,7 +94,7 @@
 - SSL 端口：`465`
 - STARTTLS 端口：`587`
 - 用户名与发件地址：公共邮箱完整地址
-- 密码引用：`env:LARK_SMTP_PASSWORD`
+- 密码引用：默认 `env:CLASSING_SMTP_PASSWORD`；如需独立隔离可改为 `env:LARK_SMTP_PASSWORD`
   - `usedToday`
   - `enabled`
 - 调度规则：

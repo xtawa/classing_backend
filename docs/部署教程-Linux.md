@@ -99,7 +99,8 @@ SCHEDULER_ENABLED=true
 
 # 在管理台添加 SMTP 邮箱时使用 env:CLASSING_SMTP_PASSWORD。
 CLASSING_SMTP_PASSWORD=替换为SMTP密码或应用专用密码
-# Lark 公共邮箱可在管理台选择 Lark 预设，并使用 env:LARK_SMTP_PASSWORD。
+# Lark 公共邮箱可在管理台选择 Lark 预设。默认可继续使用 env:CLASSING_SMTP_PASSWORD；
+# 如需单独隔离 Lark 密码，也可在管理台改为 env:LARK_SMTP_PASSWORD。
 LARK_SMTP_PASSWORD=替换为 Lark IMAP/SMTP 密码
 
 # Cloudflare Turnstile（成对配置后强制启用；生产环境强烈建议配置）
@@ -125,7 +126,7 @@ EXPOSE_VERIFICATION_CODE=false
 - STARTTLS 端口：`587`
 - 用户名：公共邮箱完整地址，例如 `noreply-classing@zcwww.cc`
 - 发件地址：同公共邮箱完整地址
-- 密码 Secret 引用：`env:LARK_SMTP_PASSWORD`
+- 密码 Secret 引用：默认 `env:CLASSING_SMTP_PASSWORD`；如需独立变量，可改为 `env:LARK_SMTP_PASSWORD`
 
 后端不会在管理台保存明文 SMTP 密码；worker 只从容器环境变量读取密码。排障时“邮件与任务”页可展开任务日志，查看连接、STARTTLS、认证、发件人、收件人和 DATA 阶段的结构化结果。
 
