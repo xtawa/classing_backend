@@ -99,6 +99,8 @@ SCHEDULER_ENABLED=true
 
 # 在管理台添加 SMTP 邮箱时使用 env:CLASSING_SMTP_PASSWORD。
 CLASSING_SMTP_PASSWORD=替换为SMTP密码或应用专用密码
+# Lark 公共邮箱可在管理台选择 Lark 预设，并使用 env:LARK_SMTP_PASSWORD。
+LARK_SMTP_PASSWORD=替换为 Lark IMAP/SMTP 密码
 
 # Cloudflare Turnstile（成对配置后强制启用；生产环境强烈建议配置）
 TURNSTILE_SITE_KEY=替换为站点密钥
@@ -113,6 +115,19 @@ EXPOSE_VERIFICATION_CODE=false
 - 管理员只会在邮箱不存在时自动创建。后续修改 `.env` 中的管理员密码不会覆盖数据库密码，请从管理台“账户设置”修改。
 - Compose 内 PostgreSQL 使用隔离网络，因此示例连接为 `sslmode=disable`。外部数据库必须使用 TLS。
 - 管理台与 API 同源部署时 `CORS_ALLOWED_ORIGINS` 可留空。
+
+### 2.2.1 Lark 公共邮箱 SMTP 配置
+
+在 Lark Admin 为公共邮箱开启 IMAP/SMTP 后，管理台“邮件与任务”页面选择 Lark 预设即可自动填入：
+
+- SMTP Host：`smtp.larksuite.com`
+- SSL 端口：`465`
+- STARTTLS 端口：`587`
+- 用户名：公共邮箱完整地址，例如 `noreply-classing@zcwww.cc`
+- 发件地址：同公共邮箱完整地址
+- 密码 Secret 引用：`env:LARK_SMTP_PASSWORD`
+
+后端不会在管理台保存明文 SMTP 密码；worker 只从容器环境变量读取密码。排障时“邮件与任务”页可展开任务日志，查看连接、STARTTLS、认证、发件人、收件人和 DATA 阶段的结构化结果。
 
 ### 2.3 启动
 

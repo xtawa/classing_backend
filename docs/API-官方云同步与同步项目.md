@@ -61,9 +61,12 @@
 - 可选接口，返回服务端下发的限制、限流策略、最大文档大小等。
 
 ### `GET /api/v1/cloud/official/events`
-- 带 Bearer token 的 SSE 事件流。
-- `Last-Event-ID` 使用已知云文档版本。
-- 云文档版本变化时发送 `settings` 事件，Web 收到后重新拉取并合并设置。
+- 带 Bearer token 的 SSE 事件流，响应类型为 `text/event-stream`。
+- `Last-Event-ID` 使用已知的非负整数云文档版本，与 `/document` 的 `ETag` 版本一致；它不是运行时事件表 ID。
+- 事件名固定为 `cloud-document`，事件 ID 为最新云文档版本。
+- `data` 仅包含 `{"version":7,"updatedAt":...}`，不包含设置或课表正文。
+- 无游标时服务端发送当前版本；客户端游标落后时只通知最新版本，无需逐条重放中间版本。
+- 服务端每 20 秒发送 keep-alive；客户端收到更高版本后通过 `GET /document` 拉取并执行 V2 合并。
 - 该事件流登录即可使用，用于 Web 与客户端设置实时同步；客户端即便选择 Google Drive 或 WebDAV 作为课表云同步方式，也会继续使用官方云同步设置。
 
 ## 5. 幂等与并发
@@ -113,4 +116,4 @@
 - `GET /document` 返回带引号的版本 ETag；`If-None-Match` 命中时返回 304。
 - `PUT /document` 必须发送 `If-Match: "<version>"`，首次创建发送 `"0"`；缺失返回 428，非法返回 400，版本冲突返回 412。
 - 同一 `Idempotency-Key` 与相同 payload 返回首次响应；同 key 不同 payload 返回 409。文档、幂等响应和审计在同一数据库事务提交。
-- `/events` 使用持久化、可排序的事件 ID；客户端保存每条 SSE 的 `id` 并在重连时发送 `Last-Event-ID`。服务端按顺序补发该用户的 `client-settings` 事件和全局 `system-settings` 事件，并每 20 秒发送心跳。正常 EOF 或 401 后客户端应带最近事件 ID 重新鉴权连接。
+- `/events` 的 SSE `id` 是官方云文档整数版本；客户端保存最后已应用版本并在重连时作为 `Last-Event-ID` 发送。服务端只发送 `cloud-document` 通知和 keep-alive，不在事件流中传输设置正文。正常 EOF 或 401 后客户端应刷新/重新鉴权并携带最近文档版本重连。

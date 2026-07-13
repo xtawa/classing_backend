@@ -27,11 +27,20 @@ const (
 )
 
 type authRequest struct {
-	Username       string `json:"username"`
-	Email          string `json:"email"`
-	Identifier     string `json:"identifier"`
-	Password       string `json:"password"`
-	TurnstileToken string `json:"turnstileToken"`
+	Username       string         `json:"username"`
+	Email          string         `json:"email"`
+	Identifier     string         `json:"identifier"`
+	Password       string         `json:"password"`
+	TurnstileToken string         `json:"turnstileToken"`
+	Consent        consentRequest `json:"consent"`
+}
+
+type consentRequest struct {
+	PrivacyPolicy       bool   `json:"privacyPolicy"`
+	TermsOfService      bool   `json:"termsOfService"`
+	CrossBorderTransfer bool   `json:"crossBorderTransfer"`
+	AcceptedAt          int64  `json:"acceptedAt"`
+	Client              string `json:"client"`
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +52,24 @@ func (s *Server) registrationConfig(w http.ResponseWriter, _ *http.Request) {
 		"turnstileRequired":         s.cfg.TurnstileRequired,
 		"turnstileSiteKey":          s.cfg.TurnstileSiteKey,
 		"emailVerificationRequired": true,
+		"legalAgreementUrls":        s.legalAgreementURLs(),
 	})
+}
+
+func (s *Server) legalAgreementURLs() map[string]string {
+	return map[string]string{
+		"privacyPolicy":       s.cfg.LegalPrivacyURL,
+		"termsOfService":      s.cfg.LegalTermsURL,
+		"crossBorderTransfer": s.cfg.LegalCrossBorderURL,
+	}
+}
+
+func requireConsent(w http.ResponseWriter, r *http.Request, consent consentRequest) bool {
+	if !consent.PrivacyPolicy || !consent.TermsOfService || !consent.CrossBorderTransfer {
+		writeError(w, r, http.StatusBadRequest, "AUTH_CONSENT_REQUIRED", "privacy policy, user agreement and cross-border data transfer agreement consent is required")
+		return false
+	}
+	return true
 }
 
 func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +79,9 @@ func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request
 	}
 	var body authRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !requireConsent(w, r, body.Consent) {
 		return
 	}
 	if ok, err := s.verifyTurnstile(r, body.TurnstileToken); err != nil {
@@ -119,10 +148,14 @@ func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request
 
 func (s *Server) confirmRegistrationEmail(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ChallengeID      string `json:"challengeId"`
-		VerificationCode string `json:"verificationCode"`
+		ChallengeID      string         `json:"challengeId"`
+		VerificationCode string         `json:"verificationCode"`
+		Consent          consentRequest `json:"consent"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !requireConsent(w, r, body.Consent) {
 		return
 	}
 	user, err := s.store.ConsumeEmailVerificationChallenge(r.Context(), strings.TrimSpace(body.ChallengeID), auth.HashOpaqueToken(strings.TrimSpace(body.VerificationCode)))
@@ -172,6 +205,9 @@ func (s *Server) verifyTurnstile(r *http.Request, token string) (bool, error) {
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var body authRequest
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !requireConsent(w, r, body.Consent) {
 		return
 	}
 	identifier := strings.ToLower(strings.TrimSpace(body.Identifier))

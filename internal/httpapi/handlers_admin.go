@@ -232,7 +232,16 @@ func (s *Server) adminListJobs(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "BRIEFING_JOB")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": items, "total": total})
+	jobIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		jobIDs = append(jobIDs, item.ID)
+	}
+	logs, err := s.store.ListBriefingJobLogs(r.Context(), jobIDs, 20)
+	if err != nil {
+		writeStoreError(w, r, err, "BRIEFING_JOB_LOG")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": items, "jobLogs": logs, "total": total})
 }
 
 func (s *Server) adminRetryJob(w http.ResponseWriter, r *http.Request) {

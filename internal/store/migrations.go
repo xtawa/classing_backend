@@ -271,6 +271,16 @@ var migrations = []string{
 		created_at BIGINT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_runtime_events_user_id ON runtime_events(user_id, id)`,
+	`CREATE TABLE IF NOT EXISTS briefing_job_logs (
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL REFERENCES briefing_jobs(id) ON DELETE CASCADE,
+		level TEXT NOT NULL,
+		event TEXT NOT NULL,
+		message TEXT NOT NULL,
+		details TEXT NOT NULL DEFAULT '{}',
+		created_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_briefing_job_logs_job ON briefing_job_logs(job_id, created_at)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

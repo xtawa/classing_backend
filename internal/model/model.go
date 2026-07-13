@@ -75,6 +75,16 @@ type BriefingJob struct {
 	Payload           string `db:"payload" json:"-"`
 }
 
+type BriefingJobLog struct {
+	ID        string `db:"id" json:"logId"`
+	JobID     string `db:"job_id" json:"jobId"`
+	Level     string `db:"level" json:"level"`
+	Event     string `db:"event" json:"event"`
+	Message   string `db:"message" json:"message"`
+	Details   string `db:"details" json:"details,omitempty"`
+	CreatedAt int64  `db:"created_at" json:"createdAt"`
+}
+
 type AuditLog struct {
 	ID         string `db:"id" json:"auditId"`
 	ActorID    string `db:"actor_id" json:"actorId,omitempty"`
@@ -131,6 +141,7 @@ const (
 	StatusActive   = "ACTIVE"
 	StatusDisabled = "DISABLED"
 	StatusPending  = "PENDING_VERIFICATION"
+	StatusDeleted  = "DELETED"
 
 	ReleaseStatusDraft     = "DRAFT"
 	ReleaseStatusPublished = "PUBLISHED"

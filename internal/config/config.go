@@ -37,6 +37,9 @@ type Config struct {
 	ReleaseStorageDir      string
 	MaxReleaseArtifactSize int64
 	TrustedProxies         []*net.IPNet
+	LegalPrivacyURL        string
+	LegalTermsURL          string
+	LegalCrossBorderURL    string
 }
 
 func Load() (Config, error) {
@@ -64,6 +67,9 @@ func Load() (Config, error) {
 		SchedulerEnabled:       boolean("SCHEDULER_ENABLED", true),
 		ReleaseStorageDir:      env("RELEASE_STORAGE_DIR", "data/releases"),
 		MaxReleaseArtifactSize: int64(integer("MAX_RELEASE_ARTIFACT_BYTES", 250*1024*1024)),
+		LegalPrivacyURL:        strings.TrimSpace(os.Getenv("LEGAL_PRIVACY_URL")),
+		LegalTermsURL:          strings.TrimSpace(os.Getenv("LEGAL_TERMS_URL")),
+		LegalCrossBorderURL:    strings.TrimSpace(os.Getenv("LEGAL_CROSS_BORDER_URL")),
 	}
 
 	cfg.DatabaseDriver = strings.ToLower(strings.TrimSpace(os.Getenv("DATABASE_DRIVER")))
@@ -104,6 +110,15 @@ func Load() (Config, error) {
 	if cfg.TurnstileRequired && cfg.TurnstileSecret == "" {
 		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required when TURNSTILE_REQUIRED=true")
 	}
+	if err := validateOptionalURL("LEGAL_PRIVACY_URL", cfg.LegalPrivacyURL); err != nil {
+		return Config{}, err
+	}
+	if err := validateOptionalURL("LEGAL_TERMS_URL", cfg.LegalTermsURL); err != nil {
+		return Config{}, err
+	}
+	if err := validateOptionalURL("LEGAL_CROSS_BORDER_URL", cfg.LegalCrossBorderURL); err != nil {
+		return Config{}, err
+	}
 	trusted, err := parseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
 	if err != nil {
 		return Config{}, err
@@ -111,6 +126,20 @@ func Load() (Config, error) {
 	cfg.TrustedProxies = trusted
 	cfg.AllowedOrigins = defaultAllowedOrigins(csv("CORS_ALLOWED_ORIGINS"), cfg.PublicBaseURL)
 	return cfg, nil
+}
+
+func validateOptionalURL(key, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("%s must be an absolute URL", key)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return fmt.Errorf("%s must use http or https", key)
+	}
+	return nil
 }
 
 func defaultAllowedOrigins(explicit []string, publicBaseURL string) []string {

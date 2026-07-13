@@ -70,6 +70,14 @@
   - `status`
   - `providerMailboxId`
   - `retryCount`
+  - `lastError`
+- `briefing_job_logs`
+  - `jobId`
+  - `level`
+  - `event`
+  - `message`
+  - `details`
+  - `createdAt`
 
 ## 4. SMTP 邮箱池设计
 - `mailbox`
@@ -79,13 +87,22 @@
   - `username`
   - `passwordSecretRef`
   - `dailyQuota`
+
+管理台可选择 Lark 公共邮箱预设：
+
+- SMTP Host：`smtp.larksuite.com`
+- SSL 端口：`465`
+- STARTTLS 端口：`587`
+- 用户名与发件地址：公共邮箱完整地址
+- 密码引用：`env:LARK_SMTP_PASSWORD`
   - `usedToday`
   - `enabled`
 - 调度规则：
   1. 从启用邮箱中选择 `usedToday < dailyQuota` 的邮箱。
   2. 优先选当天发送量最低者。
-  3. 达到上限后自动切换到下一邮箱。
-  4. 所有邮箱都满额时，任务转入待重试或次日补发队列。
+ 3. 达到上限后自动切换到下一邮箱。
+ 4. 所有邮箱都满额时，任务转入待重试或次日补发队列。
+ 5. 每次投递尝试都会写入可展开任务日志；日志只记录阶段、脱敏收件人、主机端口、TLS 模式、错误分类和 SMTP 返回，不记录 SMTP 密码。
 
 ## 5. 集群投递建议
 - 投递服务无状态化。

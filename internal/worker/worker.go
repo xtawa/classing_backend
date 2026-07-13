@@ -93,22 +93,45 @@ func (w *Worker) deliverOne(ctx context.Context) {
 		w.log.Error("claim briefing job", "error", err)
 		return
 	}
+	w.jobLog(ctx, job.ID, "INFO", "job.claimed", "Delivery worker claimed the task", map[string]any{
+		"channel":     job.Channel,
+		"targetDate":  job.TargetDate,
+		"retryCount":  job.RetryCount,
+		"scheduledAt": job.ScheduledAt,
+	})
 	usageDate := time.Now().Format("2006-01-02")
 	excluded := map[string]bool{}
 	var deliveredMailbox model.Mailbox
 	for {
 		mailbox, acquireErr := w.store.AcquireMailboxExcluding(ctx, usageDate, excluded)
 		if acquireErr != nil {
+			w.jobLog(ctx, job.ID, "ERROR", "mailbox.pool_exhausted", "No enabled mailbox with quota is available", map[string]any{"error": acquireErr.Error(), "usageDate": usageDate})
 			_ = w.store.FailBriefingJob(ctx, job.ID, "mailbox pool exhausted", job.RetryCount)
 			return
 		}
-		deliveryErr := send(mailbox, job)
+		w.jobLog(ctx, job.ID, "INFO", "mailbox.selected", "SMTP mailbox selected", map[string]any{
+			"mailboxId": mailbox.ID,
+			"name":      mailbox.Name,
+			"host":      mailbox.SMTPHost,
+			"port":      mailbox.SMTPPort,
+			"from":      mailbox.FromAddress,
+			"username":  mailbox.Username,
+			"quota":     fmt.Sprintf("%d/%d", mailbox.UsedToday, mailbox.DailyQuota),
+		})
+		deliveryErr := send(mailbox, job, func(level, event, message string, details map[string]any) {
+			w.jobLog(ctx, job.ID, level, event, message, details)
+		})
 		if deliveryErr == nil {
 			deliveredMailbox = mailbox
 			break
 		}
 		classified := classifyMailError(deliveryErr)
-		w.log.Warn("send briefing", "job_id", job.ID, "mailbox_id", mailbox.ID, "error_class", classified)
+		w.log.Warn("send briefing", "job_id", job.ID, "mailbox_id", mailbox.ID, "error_class", classified, "error", deliveryErr)
+		w.jobLog(ctx, job.ID, "ERROR", "mailbox.delivery_failed", "SMTP delivery attempt failed", map[string]any{
+			"mailboxId":  mailbox.ID,
+			"errorClass": classified,
+			"error":      deliveryErr.Error(),
+		})
 		_ = w.store.ReleaseMailboxReservation(ctx, mailbox.ID, usageDate)
 		excluded[mailbox.ID] = true
 		if classified != "smtp connection failed" && classified != "smtp authentication failed" {
@@ -118,6 +141,15 @@ func (w *Worker) deliverOne(ctx context.Context) {
 	}
 	if err := w.store.CompleteBriefingJob(ctx, job.ID, deliveredMailbox.ID); err != nil {
 		w.log.Error("complete briefing job", "job_id", job.ID, "error", err)
+		w.jobLog(ctx, job.ID, "ERROR", "job.complete_failed", "Task was delivered but could not be marked as sent", map[string]any{"error": err.Error(), "mailboxId": deliveredMailbox.ID})
+		return
+	}
+	w.jobLog(ctx, job.ID, "INFO", "job.sent", "Task delivered and marked as sent", map[string]any{"mailboxId": deliveredMailbox.ID})
+}
+
+func (w *Worker) jobLog(ctx context.Context, jobID, level, event, message string, details map[string]any) {
+	if err := w.store.AddBriefingJobLog(ctx, jobID, level, event, message, details); err != nil {
+		w.log.Warn("write briefing job log", "job_id", jobID, "event", event, "error", err)
 	}
 }
 
@@ -138,40 +170,67 @@ func classifyMailError(err error) string {
 	}
 }
 
-func send(mailbox model.Mailbox, job store.ClaimedJob) error {
+type mailLogFunc func(level, event, message string, details map[string]any)
+
+func send(mailbox model.Mailbox, job store.ClaimedJob, logStep mailLogFunc) error {
 	secretName := strings.TrimPrefix(mailbox.PasswordSecretRef, "env:")
 	if secretName == mailbox.PasswordSecretRef || secretName == "" {
+		emitMailLog(logStep, "ERROR", "smtp.secret_invalid", "Mailbox password secret reference is invalid", map[string]any{"secretRef": mailbox.PasswordSecretRef})
 		return fmt.Errorf("unsupported mailbox secret reference")
 	}
 	password := os.Getenv(secretName)
 	if password == "" {
+		emitMailLog(logStep, "ERROR", "smtp.secret_empty", "SMTP password environment variable is empty", map[string]any{"secretName": secretName})
 		return fmt.Errorf("mailbox secret %s is empty", secretName)
 	}
 	address := net.JoinHostPort(mailbox.SMTPHost, strconv.Itoa(mailbox.SMTPPort))
+	mode := "starttls_if_available"
+	if mailbox.SMTPPort == 465 {
+		mode = "implicit_tls"
+	}
+	emitMailLog(logStep, "INFO", "smtp.connect_start", "Connecting to SMTP server", map[string]any{"host": mailbox.SMTPHost, "port": mailbox.SMTPPort, "mode": mode, "secretName": secretName})
 	var client *smtp.Client
 	var err error
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	if mailbox.SMTPPort == 465 {
-		connection, dialErr := tls.Dial("tcp", address, &tls.Config{ServerName: mailbox.SMTPHost, MinVersion: tls.VersionTLS12})
+		connection, dialErr := tls.DialWithDialer(dialer, "tcp", address, &tls.Config{ServerName: mailbox.SMTPHost, MinVersion: tls.VersionTLS12})
 		if dialErr != nil {
-			return dialErr
+			emitMailLog(logStep, "ERROR", "smtp.connect_failed", "Implicit TLS SMTP connection failed", map[string]any{"error": dialErr.Error(), "host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
+			return fmt.Errorf("smtp connect implicit tls: %w", dialErr)
 		}
 		client, err = smtp.NewClient(connection, mailbox.SMTPHost)
 	} else {
-		client, err = smtp.Dial(address)
+		connection, dialErr := dialer.Dial("tcp", address)
+		if dialErr != nil {
+			emitMailLog(logStep, "ERROR", "smtp.connect_failed", "SMTP TCP connection failed", map[string]any{"error": dialErr.Error(), "host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
+			return fmt.Errorf("smtp connect tcp: %w", dialErr)
+		}
+		client, err = smtp.NewClient(connection, mailbox.SMTPHost)
 		if err == nil {
 			if ok, _ := client.Extension("STARTTLS"); ok {
+				emitMailLog(logStep, "INFO", "smtp.starttls_start", "SMTP server supports STARTTLS; upgrading connection", map[string]any{"host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
 				err = client.StartTLS(&tls.Config{ServerName: mailbox.SMTPHost, MinVersion: tls.VersionTLS12})
+				if err == nil {
+					emitMailLog(logStep, "INFO", "smtp.starttls_ok", "STARTTLS negotiation completed", map[string]any{"host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
+				}
+			} else {
+				emitMailLog(logStep, "WARN", "smtp.starttls_unavailable", "SMTP server did not advertise STARTTLS", map[string]any{"host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
 			}
 		}
 	}
 	if err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.connect_failed", "SMTP client setup failed", map[string]any{"error": err.Error(), "host": mailbox.SMTPHost, "port": mailbox.SMTPPort})
+		return fmt.Errorf("smtp connect setup: %w", err)
 	}
 	defer client.Close()
+	emitMailLog(logStep, "INFO", "smtp.connect_ok", "SMTP connection established", map[string]any{"host": mailbox.SMTPHost, "port": mailbox.SMTPPort, "mode": mode})
 	if mailbox.Username != "" {
+		emitMailLog(logStep, "INFO", "smtp.auth_start", "Authenticating SMTP user", map[string]any{"username": mailbox.Username})
 		if err := client.Auth(smtp.PlainAuth("", mailbox.Username, password, mailbox.SMTPHost)); err != nil {
-			return err
+			emitMailLog(logStep, "ERROR", "smtp.auth_failed", "SMTP authentication failed", map[string]any{"error": err.Error(), "username": mailbox.Username})
+			return fmt.Errorf("smtp auth: %w", err)
 		}
+		emitMailLog(logStep, "INFO", "smtp.auth_ok", "SMTP authentication succeeded", map[string]any{"username": mailbox.Username})
 	}
 	recipient := job.Email
 	if job.Payload != "" {
@@ -182,29 +241,64 @@ func send(mailbox model.Mailbox, job store.ClaimedJob) error {
 			recipient = override.ToEmail
 		}
 	}
+	emitMailLog(logStep, "INFO", "smtp.mail_from", "Sending SMTP MAIL FROM", map[string]any{"from": mailbox.FromAddress})
 	if err := client.Mail(mailbox.FromAddress); err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.mail_from_failed", "SMTP MAIL FROM was rejected", map[string]any{"error": err.Error(), "from": mailbox.FromAddress})
+		return fmt.Errorf("smtp mail from: %w", err)
 	}
+	emitMailLog(logStep, "INFO", "smtp.rcpt_to", "Sending SMTP RCPT TO", map[string]any{"recipient": maskEmail(recipient)})
 	if err := client.Rcpt(recipient); err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.rcpt_failed", "SMTP recipient was rejected", map[string]any{"error": err.Error(), "recipient": maskEmail(recipient)})
+		return fmt.Errorf("smtp rcpt recipient: %w", err)
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.data_failed", "SMTP DATA command failed", map[string]any{"error": err.Error()})
+		return fmt.Errorf("smtp data: %w", err)
 	}
 	subjectText, body, err := mailContent(job)
 	if err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "mail.content_failed", "Mail content rendering failed", map[string]any{"error": err.Error(), "channel": job.Channel})
+		return fmt.Errorf("mail content: %w", err)
 	}
 	subject := mime.BEncoding.Encode("UTF-8", subjectText)
 	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", mailbox.FromAddress, recipient, subject, body)
 	if _, err := writer.Write([]byte(message)); err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.write_failed", "Writing message body failed", map[string]any{"error": err.Error(), "subject": subjectText})
+		return fmt.Errorf("smtp write: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return err
+		emitMailLog(logStep, "ERROR", "smtp.data_close_failed", "SMTP DATA close failed", map[string]any{"error": err.Error(), "subject": subjectText})
+		return fmt.Errorf("smtp data close: %w", err)
 	}
-	return client.Quit()
+	emitMailLog(logStep, "INFO", "smtp.accepted", "SMTP server accepted the message", map[string]any{"subject": subjectText, "recipient": maskEmail(recipient)})
+	if err := client.Quit(); err != nil {
+		emitMailLog(logStep, "WARN", "smtp.quit_failed", "SMTP QUIT failed after message acceptance", map[string]any{"error": err.Error()})
+		return fmt.Errorf("smtp quit: %w", err)
+	}
+	emitMailLog(logStep, "INFO", "smtp.quit_ok", "SMTP session closed cleanly", nil)
+	return nil
+}
+
+func emitMailLog(logStep mailLogFunc, level, event, message string, details map[string]any) {
+	if logStep != nil {
+		logStep(level, event, message, details)
+	}
+}
+
+func maskEmail(value string) string {
+	parts := strings.Split(value, "@")
+	if len(parts) != 2 {
+		return value
+	}
+	local := parts[0]
+	if local == "" {
+		return "***@" + parts[1]
+	}
+	if len(local) <= 2 {
+		return local[:1] + "***@" + parts[1]
+	}
+	return local[:1] + "***" + local[len(local)-1:] + "@" + parts[1]
 }
 
 func mailContent(job store.ClaimedJob) (string, string, error) {

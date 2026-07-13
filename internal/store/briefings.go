@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -293,6 +294,69 @@ func (s *Store) ListBriefingJobs(ctx context.Context, limit, offset int) ([]mode
 	items := []model.BriefingJob{}
 	err := s.db.SelectContext(ctx, &items, s.rebind(`SELECT * FROM briefing_jobs ORDER BY created_at DESC LIMIT ? OFFSET ?`), limit, offset)
 	return items, total, err
+}
+
+func (s *Store) AddBriefingJobLog(ctx context.Context, jobID, level, event, message string, details map[string]any) error {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return ErrInvalid
+	}
+	level = strings.ToUpper(strings.TrimSpace(level))
+	if level == "" {
+		level = "INFO"
+	}
+	event = strings.TrimSpace(event)
+	if event == "" {
+		event = "event"
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = event
+	}
+	payload := "{}"
+	if len(details) > 0 {
+		encoded, err := json.Marshal(details)
+		if err != nil {
+			return fmt.Errorf("encode job log details: %w", err)
+		}
+		payload = prefixError(string(encoded), 4000)
+	}
+	_, err := s.db.ExecContext(
+		ctx,
+		s.rebind(`INSERT INTO briefing_job_logs (id, job_id, level, event, message, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`),
+		ids.New("jlg"),
+		jobID,
+		prefixError(level, 16),
+		prefixError(event, 80),
+		prefixError(message, 500),
+		payload,
+		nowMillis(),
+	)
+	return normalizeDBError(err)
+}
+
+func (s *Store) ListBriefingJobLogs(ctx context.Context, jobIDs []string, limitPerJob int) (map[string][]model.BriefingJobLog, error) {
+	result := map[string][]model.BriefingJobLog{}
+	if limitPerJob <= 0 {
+		limitPerJob = 20
+	}
+	seen := map[string]bool{}
+	for _, jobID := range jobIDs {
+		jobID = strings.TrimSpace(jobID)
+		if jobID == "" || seen[jobID] {
+			continue
+		}
+		seen[jobID] = true
+		items := []model.BriefingJobLog{}
+		if err := s.db.SelectContext(ctx, &items, s.rebind(`SELECT * FROM briefing_job_logs WHERE job_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`), jobID, limitPerJob); err != nil {
+			return nil, err
+		}
+		for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+			items[i], items[j] = items[j], items[i]
+		}
+		result[jobID] = items
+	}
+	return result, nil
 }
 
 func (s *Store) RetryBriefingJob(ctx context.Context, id string) error {

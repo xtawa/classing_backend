@@ -159,34 +159,31 @@ func buildTestAPK(t *testing.T) []byte {
 
 func (c testClient) request(t *testing.T, method, path, token string, body any) (int, map[string]any) {
 	t.Helper()
-	var payload []byte
-	if body != nil {
-		payload, _ = json.Marshal(body)
-	}
-	request, err := http.NewRequest(method, c.base+path, bytes.NewReader(payload))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-	response, err := c.client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	result := map[string]any{}
-	_ = json.NewDecoder(response.Body).Decode(&result)
-	return response.StatusCode, result
+	return c.requestWithConsentInjection(t, method, path, token, body, nil, true)
+}
+
+func (c testClient) requestRaw(t *testing.T, method, path, token string, body any) (int, map[string]any) {
+	t.Helper()
+	return c.requestWithConsentInjection(t, method, path, token, body, nil, false)
 }
 
 func (c testClient) requestWithHeaders(t *testing.T, method, path, token string, body any, headers map[string]string) (int, map[string]any) {
 	t.Helper()
+	return c.requestWithConsentInjection(t, method, path, token, body, headers, true)
+}
+
+func (c testClient) requestWithHeadersRaw(t *testing.T, method, path, token string, body any, headers map[string]string) (int, map[string]any) {
+	t.Helper()
+	return c.requestWithConsentInjection(t, method, path, token, body, headers, false)
+}
+
+func (c testClient) requestWithConsentInjection(t *testing.T, method, path, token string, body any, headers map[string]string, injectConsent bool) (int, map[string]any) {
+	t.Helper()
 	var payload []byte
 	if body != nil {
+		if injectConsent {
+			body = withTestConsent(path, body)
+		}
 		payload, _ = json.Marshal(body)
 	}
 	request, err := http.NewRequest(method, c.base+path, bytes.NewReader(payload))
@@ -210,6 +207,125 @@ func (c testClient) requestWithHeaders(t *testing.T, method, path, token string,
 	result := map[string]any{}
 	_ = json.NewDecoder(response.Body).Decode(&result)
 	return response.StatusCode, result
+}
+
+func withTestConsent(path string, body any) any {
+	if path != "/api/v1/auth/login" && path != "/api/v1/auth/register/email/request" && path != "/api/v1/auth/register/email/confirm" {
+		return body
+	}
+	payload, ok := body.(map[string]any)
+	if !ok {
+		return body
+	}
+	if _, exists := payload["consent"]; exists {
+		return body
+	}
+	copy := make(map[string]any, len(payload)+1)
+	for key, value := range payload {
+		copy[key] = value
+	}
+	copy["consent"] = map[string]any{
+		"privacyPolicy":       true,
+		"termsOfService":      true,
+		"crossBorderTransfer": true,
+		"acceptedAt":          time.Now().UnixMilli(),
+		"client":              "test",
+	}
+	return copy
+}
+
+func TestAuthConsentRequiredAndLegalConfig(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if _, err := data.BootstrapAdmin(ctx, "admin", "admin@classing.test", "AdminPass123!"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Environment:          "test",
+		JWTSecret:            []byte("01234567890123456789012345678901"),
+		AccessTokenTTL:       time.Minute,
+		RefreshTokenTTL:      time.Hour,
+		EmailVerificationTTL: time.Minute,
+		LegalPrivacyURL:      "https://legal.example/privacy",
+		LegalTermsURL:        "https://legal.example/terms",
+		LegalCrossBorderURL:  "https://legal.example/cross-border",
+	}
+	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>Classing</title>")}}
+	testServer := httptest.NewServer(New(cfg, data, web, slog.Default()).Handler())
+	defer testServer.Close()
+	client := testClient{base: testServer.URL, client: testServer.Client()}
+
+	status, body := client.request(t, http.MethodGet, "/api/v1/auth/registration/config", "", nil)
+	if status != http.StatusOK {
+		t.Fatalf("registration config: %d %+v", status, body)
+	}
+	urls := body["legalAgreementUrls"].(map[string]any)
+	if urls["privacyPolicy"] != cfg.LegalPrivacyURL || urls["termsOfService"] != cfg.LegalTermsURL || urls["crossBorderTransfer"] != cfg.LegalCrossBorderURL {
+		t.Fatalf("legal agreement urls not exposed: %+v", urls)
+	}
+
+	status, body = client.requestRaw(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "admin", "password": "AdminPass123!"})
+	if status != http.StatusBadRequest || body["code"] != "AUTH_CONSENT_REQUIRED" {
+		t.Fatalf("login without consent: %d %+v", status, body)
+	}
+	status, body = client.requestRaw(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": "alice", "email": "alice@test.local", "password": "AlicePass123!"})
+	if status != http.StatusBadRequest || body["code"] != "AUTH_CONSENT_REQUIRED" {
+		t.Fatalf("register without consent: %d %+v", status, body)
+	}
+}
+
+func TestAccountDeleteSoftDeletesAndRevokesAllSessions(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, EmailVerificationTTL: time.Minute, ExposeVerificationCode: true, MaxCloudDocumentSize: 1024 * 1024}
+	web := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<!doctype html><title>Classing</title>")}}
+	testServer := httptest.NewServer(New(cfg, data, web, slog.Default()).Handler())
+	defer testServer.Close()
+	client := testClient{base: testServer.URL, client: testServer.Client()}
+
+	firstAccess := registerTestUser(t, client, "alice", "alice@delete.test", "AlicePass123!")
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "alice@delete.test", "password": "AlicePass123!"})
+	if status != http.StatusOK {
+		t.Fatalf("second login: %d %+v", status, body)
+	}
+	secondAccess := body["session"].(map[string]any)["accessToken"].(string)
+	secondRefresh := body["session"].(map[string]any)["refreshToken"].(string)
+
+	status, body = client.request(t, http.MethodPost, "/api/v1/account/delete", firstAccess, map[string]any{"currentPassword": "WrongPass123!", "confirm": "DELETE"})
+	if status != http.StatusForbidden || body["code"] != "ACCOUNT_PASSWORD_CURRENT_INVALID" {
+		t.Fatalf("delete with wrong password: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/account/delete", firstAccess, map[string]any{"currentPassword": "AlicePass123!", "confirm": "DELETE"})
+	if status != http.StatusOK || body["sessionsRevoked"] != true {
+		t.Fatalf("delete account: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", secondAccess, nil)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("second access survived account deletion: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/refresh", "", map[string]any{"refreshToken": secondRefresh})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("second refresh survived account deletion: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "alice@delete.test", "password": "AlicePass123!"})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("deleted account login succeeded: %d %+v", status, body)
+	}
+	users, total, err := data.ListUsers(ctx, 10, 0, "delete")
+	if err != nil || total != 1 {
+		t.Fatalf("list deleted user: total=%d users=%+v err=%v", total, users, err)
+	}
+	if users[0].Status != model.StatusDeleted || strings.Contains(users[0].Email, "alice@delete.test") || strings.Contains(users[0].Username, "alice") {
+		t.Fatalf("user was not soft-deleted and anonymized: %+v", users[0])
+	}
 }
 
 func TestAccountMembershipAndSessionRevocation(t *testing.T) {

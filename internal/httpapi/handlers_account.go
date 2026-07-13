@@ -154,3 +154,29 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, user.ID, "ACCOUNT_PASSWORD_CHANGE", "USER", user.ID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "sessionsRevoked": true})
 }
+
+func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		Confirm         string `json:"confirm"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	user := principal(r).User
+	if !auth.VerifyPassword(user.PasswordHash, body.CurrentPassword) {
+		writeError(w, r, http.StatusForbidden, "ACCOUNT_PASSWORD_CURRENT_INVALID", "current password is incorrect")
+		return
+	}
+	confirmation := strings.TrimSpace(body.Confirm)
+	if confirmation != "DELETE" && confirmation != "注销账号" {
+		writeError(w, r, http.StatusBadRequest, "ACCOUNT_DELETE_CONFIRMATION_REQUIRED", "account deletion confirmation is required")
+		return
+	}
+	if err := s.store.DeleteAccount(r.Context(), user.ID, s.auditContext(r, user.ID, "ACCOUNT_DELETE", "USER", user.ID, nil)); err != nil {
+		writeStoreError(w, r, err, "ACCOUNT_DELETE")
+		return
+	}
+	s.refreshReplays.invalidateUser(user.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "sessionsRevoked": true})
+}

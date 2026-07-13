@@ -338,6 +338,73 @@ func (s *Store) UpdatePassword(ctx context.Context, id, hash string) error {
 	return tx.Commit()
 }
 
+func (s *Store) DeleteAccount(ctx context.Context, userID string, audit AuditContext) error {
+	if strings.TrimSpace(userID) == "" {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	lockSuffix := ""
+	if s.dialect == "pgx" {
+		lockSuffix = " FOR UPDATE"
+	}
+	var current model.User
+	if err := tx.GetContext(ctx, &current, s.rebind(`SELECT * FROM users WHERE id = ?`)+lockSuffix, userID); err != nil {
+		return normalizeDBError(err)
+	}
+	if current.Status != model.StatusActive {
+		return ErrForbidden
+	}
+	if current.Role == model.RoleAdmin {
+		remaining := 0
+		if s.dialect == "pgx" {
+			var activeAdminIDs []string
+			if err := tx.SelectContext(ctx, &activeAdminIDs, s.rebind(`SELECT id FROM users WHERE role = ? AND status = ? ORDER BY id FOR UPDATE`), model.RoleAdmin, model.StatusActive); err != nil {
+				return err
+			}
+			for _, adminID := range activeAdminIDs {
+				if adminID != userID {
+					remaining++
+				}
+			}
+		} else if err := tx.GetContext(ctx, &remaining, s.rebind(`SELECT COUNT(*) FROM users WHERE role = ? AND status = ? AND id <> ?`), model.RoleAdmin, model.StatusActive, userID); err != nil {
+			return err
+		}
+		if remaining == 0 {
+			return ErrConflict
+		}
+	}
+	now := nowMillis()
+	suffix := current.ID
+	if len(suffix) > 32 {
+		suffix = suffix[len(suffix)-32:]
+	}
+	deletedUsername := "deleted_" + suffix
+	deletedEmail := "deleted+" + current.ID + "@deleted.classing.local"
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET username = ?, email = ?, password_hash = '', status = ?, email_verified = 0, auth_epoch = ?, updated_at = ? WHERE id = ? AND status = ?`), deletedUsername, deletedEmail, model.StatusDeleted, now, now, userID, model.StatusActive)
+	if err != nil {
+		return normalizeDBError(err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, userID); err != nil {
+		return err
+	}
+	audit.TargetID = userID
+	audit.Metadata = map[string]any{"deletedAt": now}
+	if err := s.auditInTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt int64, ip, ua string) (string, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {

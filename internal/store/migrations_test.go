@@ -15,7 +15,7 @@ func TestMigrateEmptyDB(t *testing.T) {
 				"users", "auth_sessions", "refresh_tokens", "password_reset_tokens",
 				"memberships", "membership_events", "redeem_codes", "redeem_redemptions",
 				"timetable_projects", "cloud_documents", "idempotency_keys",
-				"briefing_subscriptions", "mailboxes", "briefing_jobs",
+				"briefing_subscriptions", "mailboxes", "briefing_jobs", "briefing_job_logs",
 				"announcements", "app_releases", "audit_logs", "system_settings",
 				"runtime_events",
 				"email_verification_challenges", "email_change_requests",

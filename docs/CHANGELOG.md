@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-07-13 · Lark SMTP 适配与邮件任务详细日志
+
+### Added
+
+- 管理台“邮件与任务”新增 Lark 公共邮箱预设，可一键填入 `smtp.larksuite.com`、SSL 465 或 STARTTLS 587、公共邮箱用户名和 `env:LARK_SMTP_PASSWORD`。
+- 新增 `briefing_job_logs` 表，邮件 worker 会记录任务领取、邮箱选择、SMTP 连接、STARTTLS、认证、MAIL FROM、RCPT TO、DATA、服务器接受和完成状态。
+- `GET /api/v1/admin/briefing-jobs` 额外返回 `jobLogs`，Web 端可在任务行中展开查看结构化详情。
+
+### Changed
+
+- SMTP 连接改为显式 10 秒拨号超时；465 使用隐式 TLS，其他端口使用 STARTTLS if available，并在失败时保存具体阶段和脱敏详情。
+- `.env.example` 和 Linux 部署文档补充 `LARK_SMTP_PASSWORD` 配置说明。
+
+## 2026-07-13 · 账号注销、协议确认与过期会员设置同步
+
+### Added
+
+- 新增 `POST /api/v1/account/delete`，要求当前密码与二次确认文本，成功后软删除账户并撤销该账户全部设备会话。
+- `GET /api/v1/auth/registration/config` 新增 `legalAgreementUrls`，由 `LEGAL_PRIVACY_URL`、`LEGAL_TERMS_URL`、`LEGAL_CROSS_BORDER_URL` 配置。
+- Web 登录、邮箱注册申请和邮箱注册确认必须携带三项协议同意；缺失或未全选返回 `400 AUTH_CONSENT_REQUIRED`。
+
+### Changed
+
+- 官方云 SSE 事件统一为 `cloud-document`，`Last-Event-ID` 明确定义为云文档整数版本，事件流只通知版本和更新时间，不传输设置正文。
+- 会员过期或非会员账户仍可同步设置域；课表域在 GET 中被过滤、PUT 中被忽略，服务端保留既有课表数据但不继续下发或合并。
+
+### Client Impact
+
+- 登录页和注册页必须展示并校验《隐私政策》《用户协议》《个人数据跨境传输协议》复选框，未勾选不得提交。
+- 注销成功后客户端必须清空本地凭据并回到登录页；其他设备会在下一次请求或刷新时失效。
+
 ## 2026-07-13 · Code review 异常修复：可撤销会话、条件同步与可靠部署
 
 ### Changed

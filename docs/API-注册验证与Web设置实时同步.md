@@ -12,9 +12,16 @@
 {
   "turnstileRequired": true,
   "turnstileSiteKey": "0x4...",
-  "emailVerificationRequired": true
+  "emailVerificationRequired": true,
+  "legalAgreementUrls": {
+    "privacyPolicy": "https://example.com/privacy",
+    "termsOfService": "https://example.com/terms",
+    "crossBorderTransfer": "https://example.com/cross-border-transfer"
+  }
 }
 ```
+
+`legalAgreementUrls` 由服务端环境变量下发，客户端必须拿到完整 URL 后再允许登录或注册下一步操作。
 
 ### 1.2 申请邮件验证码
 
@@ -25,7 +32,14 @@
   "username": "alice",
   "email": "alice@example.com",
   "password": "UserPass123!",
-  "turnstileToken": "turnstile-response"
+  "turnstileToken": "turnstile-response",
+  "consent": {
+    "privacyPolicy": true,
+    "termsOfService": true,
+    "crossBorderTransfer": true,
+    "acceptedAt": 1783698400000,
+    "client": "web"
+  }
 }
 ```
 
@@ -50,7 +64,14 @@
 ```json
 {
   "challengeId": "evc_...",
-  "verificationCode": "123456"
+  "verificationCode": "123456",
+  "consent": {
+    "privacyPolicy": true,
+    "termsOfService": true,
+    "crossBorderTransfer": true,
+    "acceptedAt": 1783698700000,
+    "client": "web"
+  }
 }
 ```
 
@@ -62,8 +83,15 @@
 - `TURNSTILE_SECRET`
 - `EMAIL_VERIFICATION_TTL=10m`
 - `EXPOSE_VERIFICATION_CODE=false`：仅限非生产联调，生产环境即使设为 true 也不会回传验证码。
+- `LEGAL_PRIVACY_URL`
+- `LEGAL_TERMS_URL`
+- `LEGAL_CROSS_BORDER_URL`
 
 未配置 `TURNSTILE_SECRET` 时后端允许跳过 Turnstile，适用于本地和自动化测试；生产部署应同时配置 site key 与 secret。
+
+### 1.5 登录协议确认
+
+`POST /api/v1/auth/login` 也必须携带同结构的 `consent`。三项布尔值未全部为 `true` 时返回 `400 AUTH_CONSENT_REQUIRED`。前端必须展示“您已阅读并同意《隐私政策》《用户协议》和《个人数据跨境传输协议》”复选框，未勾选不得提交。
 
 ## 2. Web 与客户端设置同步
 
@@ -110,7 +138,27 @@ Web 端直接读写官方云 `classing_cloud_sync_v2` 文档的 `mobile.settings
 
 超限返回 `429 CLIENT_RATE_LIMITED` 和 `Retry-After: 60`。Android 客户端同时执行本地 3 次/分钟保护，减少误触和重复请求。
 
-## 4. 管理台能力
+## 4. 账号注销
+
+`POST /api/v1/account/delete`
+
+认证：`Authorization: Bearer <accessToken>`。
+
+```json
+{
+  "currentPassword": "UserPass123!",
+  "confirm": "DELETE"
+}
+```
+
+规则：
+
+- 前端必须二次确认，确认文本为 `DELETE` 或 `注销账号`。
+- 服务端校验当前密码后软删除账户、清空密码哈希、撤销该账户所有 access/refresh 会话，并提升 `auth_epoch`。
+- 成功后客户端必须清理本地凭据并回到登录页；其他设备会在下一次请求或刷新时收到会话撤销。
+- 最后一个活跃管理员账户不可注销。
+
+## 5. 管理台能力
 
 - 用户目录可调用 `POST /api/v1/admin/membership/revoke` 吊销会员。
 - SMTP 邮箱支持创建、编辑和删除：

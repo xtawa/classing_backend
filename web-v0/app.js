@@ -70,6 +70,54 @@ function browserDeviceId() {
 
 function sleep(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
+function authConsentPayload() {
+  return {
+    privacyPolicy: true,
+    termsOfService: true,
+    crossBorderTransfer: true,
+    acceptedAt: Date.now(),
+    client: "web",
+  };
+}
+
+function legalAgreementUrls() {
+  return state.registrationConfig?.legalAgreementUrls || {};
+}
+
+function legalAgreementUrlsReady() {
+  const urls = legalAgreementUrls();
+  return Boolean(urls.privacyPolicy && urls.termsOfService && urls.crossBorderTransfer);
+}
+
+function updateAuthLegalLinks() {
+  const urls = legalAgreementUrls();
+  [
+    ["privacyPolicyLink", urls.privacyPolicy],
+    ["termsOfServiceLink", urls.termsOfService],
+    ["crossBorderTransferLink", urls.crossBorderTransfer],
+  ].forEach(([id, url]) => {
+    const item = document.getElementById(id);
+    if (!item) return;
+    item.href = url || "#";
+    item.setAttribute("aria-disabled", url ? "false" : "true");
+  });
+  updateAuthSubmitState();
+}
+
+function updateAuthSubmitState() {
+  const consent = document.getElementById("authConsent");
+  const submit = document.getElementById("authSubmit");
+  if (!consent || !submit) return;
+  submit.disabled = !consent.checked || !legalAgreementUrlsReady();
+}
+
+async function ensureRegistrationConfig() {
+  if (state.registrationConfig) return state.registrationConfig;
+  state.registrationConfig = await (await safeFetch("/api/v1/auth/registration/config")).json();
+  updateAuthLegalLinks();
+  return state.registrationConfig;
+}
+
 async function safeFetch(path, options) {
   try {
     return await fetch(path, options);
@@ -172,6 +220,10 @@ function showAuth() {
   prototype.hidden = true;
   authShell.hidden = false;
   setAuthMode("login");
+  ensureRegistrationConfig().catch(() => {
+    document.getElementById("authError").textContent = "协议链接配置无法加载，请稍后重试";
+    updateAuthSubmitState();
+  });
   document.getElementById("authIdentifier").focus();
 }
 
@@ -211,6 +263,7 @@ function bindChrome() {
   });
   document.getElementById("themeToggle").addEventListener("change", (event) => document.body.classList.toggle("dark", event.target.checked));
   document.getElementById("authSwitch").addEventListener("click", () => setAuthMode(state.authMode === "login" ? "register" : "login"));
+  document.getElementById("authConsent").addEventListener("change", updateAuthSubmitState);
   document.getElementById("authForm").addEventListener("submit", submitAuth);
   document.getElementById("resetLink").addEventListener("click", requestReset);
   document.getElementById("materialFab").addEventListener("click", handleFab);
@@ -237,12 +290,13 @@ function setAuthMode(mode) {
   document.getElementById("resetLink").hidden = register;
   document.getElementById("authPassword").autocomplete = register ? "new-password" : "current-password";
   document.getElementById("authError").textContent = "";
+  updateAuthLegalLinks();
   if (register) prepareRegistrationSecurity();
 }
 
 async function prepareRegistrationSecurity() {
   try {
-    state.registrationConfig = await (await safeFetch("/api/v1/auth/registration/config")).json();
+    await ensureRegistrationConfig();
     if (!state.registrationConfig.turnstileRequired || !state.registrationConfig.turnstileSiteKey) return;
     if (!window.turnstile) {
       await new Promise((resolve, reject) => {
@@ -266,10 +320,13 @@ async function submitAuth(event) {
   const errorNode = document.getElementById("authError");
   button.disabled = true; errorNode.textContent = "";
   try {
+    if (!legalAgreementUrlsReady()) throw new Error("协议链接配置缺失，请联系管理员");
+    if (!document.getElementById("authConsent").checked) throw new Error("请先勾选同意隐私政策、用户协议和个人数据跨境传输协议");
     const register = state.authMode === "register";
     const payload = register
       ? { username: document.getElementById("authUsername").value, email: document.getElementById("authEmail").value, password: document.getElementById("authPassword").value }
       : { identifier: document.getElementById("authIdentifier").value, password: document.getElementById("authPassword").value };
+    payload.consent = authConsentPayload();
     let path = "/api/v1/auth/login";
     if (register && !state.registrationChallengeId) {
       path = "/api/v1/auth/register/email/request";
@@ -297,7 +354,7 @@ async function submitAuth(event) {
     errorNode.textContent = error.message;
     if (state.authMode === "register" && !state.registrationChallengeId && state.turnstileWidgetId !== null && window.turnstile) window.turnstile.reset(state.turnstileWidgetId);
   }
-  finally { button.disabled = false; }
+  finally { updateAuthSubmitState(); }
 }
 
 async function requestReset() {
@@ -509,12 +566,46 @@ function formatBytes(value) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function parseLogDetails(details) {
+  if (!details) return {};
+  try { return JSON.parse(details); } catch { return { raw: details }; }
+}
+
+function logDetailsHTML(details) {
+  const parsed = parseLogDetails(details);
+  const entries = Object.entries(parsed).filter(([, value]) => value !== "" && value !== null && value !== undefined);
+  if (!entries.length) return "";
+  return `<pre class="log-json">${escapeHTML(JSON.stringify(Object.fromEntries(entries), null, 2))}</pre>`;
+}
+
+function jobLogsHTML(job, logs) {
+  const items = logs?.[job.jobId] || [];
+  const lastError = job.lastError ? `<div class="job-last-error"><strong>Last error</strong><span>${escapeHTML(job.lastError)}</span></div>` : "";
+  if (!items.length && !lastError) return `<details class="log-details"><summary>无详细日志</summary><div class="log-empty">该任务尚未被 worker 处理。</div></details>`;
+  return `<details class="log-details"><summary>查看详细日志 ${items.length ? `(${items.length})` : ""}</summary>${lastError}<div class="log-lines">${items.map((item) => `<div class="log-line ${escapeHTML(String(item.level || "").toLowerCase())}"><div><span class="status-pill">${escapeHTML(item.level)}</span><strong>${escapeHTML(item.event)}</strong><small>${formatDate(item.createdAt, true)}</small></div><p>${escapeHTML(item.message)}</p>${logDetailsHTML(item.details)}</div>`).join("")}</div></details>`;
+}
+
 async function renderMail() {
   const [mailboxes, jobs] = await Promise.all([api("/api/v1/admin/mailboxes"), api("/api/v1/admin/briefing-jobs?limit=50")]);
   setFab("添加邮箱");
-  content.innerHTML = `<div class="runtime-page">${hero("mail", `<div class="hero-stat"><strong>${jobs.total}</strong><span>投递任务</span></div>`)}<div class="runtime-grid"><section class="runtime-panel half"><h2>添加 SMTP 邮箱</h2><form class="runtime-form" id="mailboxForm"><label class="form-field"><span>名称</span><input name="name" required></label><label class="form-field"><span>发件地址</span><input name="fromAddress" type="email" required></label><label class="form-field"><span>SMTP Host</span><input name="smtpHost" required></label><label class="form-field"><span>端口</span><input name="smtpPort" type="number" value="587" required></label><label class="form-field"><span>用户名</span><input name="username" required></label><label class="form-field"><span>密码 Secret 引用</span><input name="passwordSecretRef" value="env:SMTP_PASSWORD" required></label><label class="form-field"><span>每日额度</span><input name="dailyQuota" type="number" value="500" required></label><div class="runtime-actions full"><button class="primary-button">添加邮箱</button></div></form></section>
-    <section class="runtime-panel half"><h2>邮箱池</h2>${mailboxes.mailboxes.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>邮箱</th><th>Host</th><th>额度</th><th>操作</th></tr></thead><tbody>${mailboxes.mailboxes.map((item) => `<tr><td>${escapeHTML(item.name)}<br><small>${escapeHTML(item.fromAddress)}</small></td><td>${escapeHTML(item.smtpHost)}:${item.smtpPort}</td><td>${item.usedToday}/${item.dailyQuota}</td><td><div class="runtime-actions"><button class="tonal-button" data-edit-mailbox="${item.mailboxId}">编辑</button><button class="danger-button" data-delete-mailbox="${item.mailboxId}">删除</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("邮箱池未配置", "添加邮箱后，投递工作器会从环境变量读取密码。")}</section>
-    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>最近任务</h2><span class="status-pill">${jobs.total}</span></div>${jobs.jobs.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>日期</th><th>重试</th></tr></thead><tbody>${jobs.jobs.map((item) => `<tr><td>${escapeHTML(item.jobId)}</td><td>${escapeHTML(item.userId)}</td><td>${escapeHTML(item.status)}</td><td>${escapeHTML(item.targetDate)}</td><td><button class="tonal-button" data-retry-job="${item.jobId}">重试</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("暂无投递任务", "测试简报或定时任务会显示在这里。")}</section></div></div>`;
+  const logs = jobs.jobLogs || {};
+  content.innerHTML = `<div class="runtime-page">${hero("mail", `<div class="hero-stat"><strong>${jobs.total}</strong><span>投递任务</span></div>`)}<div class="runtime-grid"><section class="runtime-panel half"><div class="runtime-panel-header"><h2>添加 SMTP 邮箱</h2><span class="status-pill">Lark Ready</span></div><form class="runtime-form" id="mailboxForm"><label class="form-field full"><span>服务商预设</span><select id="mailPreset"><option value="custom">自定义 SMTP</option><option value="lark_ssl">Lark 公共邮箱 · SSL 465</option><option value="lark_starttls">Lark 公共邮箱 · STARTTLS 587</option></select></label><p class="full form-hint">Lark 公共邮箱请在后台开启 IMAP/SMTP 服务；用户名与发件地址使用完整邮箱，密码填写为服务器环境变量引用，不在管理台录入明文。</p><label class="form-field"><span>名称</span><input name="name" required></label><label class="form-field"><span>发件地址</span><input name="fromAddress" type="email" required></label><label class="form-field"><span>SMTP Host</span><input name="smtpHost" required></label><label class="form-field"><span>端口</span><input name="smtpPort" type="number" value="465" required></label><label class="form-field"><span>用户名</span><input name="username" required></label><label class="form-field"><span>密码 Secret 引用</span><input name="passwordSecretRef" value="env:LARK_SMTP_PASSWORD" required></label><label class="form-field"><span>每日额度</span><input name="dailyQuota" type="number" value="450" required></label><div class="runtime-actions full"><button class="primary-button">添加邮箱</button></div></form></section>
+    <section class="runtime-panel half"><h2>邮箱池</h2>${mailboxes.mailboxes.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>邮箱</th><th>SMTP</th><th>额度</th><th>操作</th></tr></thead><tbody>${mailboxes.mailboxes.map((item) => `<tr><td>${escapeHTML(item.name)}<br><small>${escapeHTML(item.fromAddress)}</small><br><small>${escapeHTML(item.username)}</small></td><td>${escapeHTML(item.smtpHost)}:${item.smtpPort}<br><small>${item.smtpPort === 465 ? "SSL/TLS" : "STARTTLS if available"}</small></td><td>${item.usedToday}/${item.dailyQuota}</td><td><div class="runtime-actions"><button class="tonal-button" data-edit-mailbox="${item.mailboxId}">编辑</button><button class="danger-button" data-delete-mailbox="${item.mailboxId}">删除</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("邮箱池未配置", "添加邮箱后，投递工作器会从环境变量读取密码。")}</section>
+    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>最近任务</h2><span class="status-pill">${jobs.total}</span></div>${jobs.jobs.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>任务</th><th>用户</th><th>状态</th><th>投递信息</th><th>日志</th><th>操作</th></tr></thead><tbody>${jobs.jobs.map((item) => `<tr><td><strong>${escapeHTML(item.jobId)}</strong><br><small>${escapeHTML(item.channel)}</small></td><td>${escapeHTML(item.userId)}</td><td>${escapeHTML(item.status)}<br><small>retry ${item.retryCount || 0}</small></td><td>${escapeHTML(item.targetDate)}<br><small>${formatDate(item.updatedAt, true)}</small></td><td>${jobLogsHTML(item, logs)}</td><td><button class="tonal-button" data-retry-job="${item.jobId}">重试</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("暂无投递任务", "测试简报或定时任务会显示在这里。")}</section></div></div>`;
+  const applyPreset = (preset) => {
+    const form = document.getElementById("mailboxForm");
+    if (!form || preset === "custom") return;
+    const ssl = preset === "lark_ssl";
+    form.elements.name.value = "Lark noreply-classing";
+    form.elements.fromAddress.value = "noreply-classing@zcwww.cc";
+    form.elements.smtpHost.value = "smtp.larksuite.com";
+    form.elements.smtpPort.value = ssl ? "465" : "587";
+    form.elements.username.value = "noreply-classing@zcwww.cc";
+    form.elements.passwordSecretRef.value = "env:LARK_SMTP_PASSWORD";
+    form.elements.dailyQuota.value = "450";
+  };
+  document.getElementById("mailPreset").addEventListener("change", (event) => applyPreset(event.target.value));
+  applyPreset("lark_ssl");
   document.getElementById("mailboxForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); data.smtpPort = Number(data.smtpPort); data.dailyQuota = Number(data.dailyQuota); data.enabled = 1; const id = event.currentTarget.dataset.editingId; try { await api(id ? `/api/v1/admin/mailboxes/${id}` : "/api/v1/admin/mailboxes", { method: id ? "PUT" : "POST", body: JSON.stringify(data) }); toast(id ? "邮箱信息已更新" : "邮箱已加入池中"); renderMail(); } catch (error) { toast(error.message, "error"); } });
   document.querySelectorAll("[data-edit-mailbox]").forEach((button) => button.addEventListener("click", () => {
     const item = mailboxes.mailboxes.find((mailbox) => mailbox.mailboxId === button.dataset.editMailbox); if (!item) return;
@@ -691,18 +782,21 @@ async function renderSettings() {
   if (state.settingsRendering) return;
   state.settingsRendering = true;
   try {
-  const settings = isAdmin() ? await api("/api/v1/admin/settings") : { settings: {} };
+  const [settings, membership] = await Promise.all([isAdmin() ? api("/api/v1/admin/settings") : Promise.resolve({ settings: {} }), api("/api/v1/membership/status")]);
   let cloud = null; let mobileSettings = {}; let cloudError = "";
   try { cloud = await fetchCloudDocument(true, state.cloudEventVersion); mobileSettings = readMobileSettings(cloud.document); } catch (error) { cloudError = error.message; }
+  const settingsSyncStatus = cloud ? (membership.membership?.isMember ? "实时连接" : "仅同步设置") : "不可用";
   setFab("编辑设置");
   content.innerHTML = `<div class="runtime-page">${hero("settings", `<div class="hero-stat"><strong>${escapeHTML(state.account.role)}</strong><span>${escapeHTML(state.account.status)}</span></div>`)}<div class="runtime-grid">
     <section class="runtime-panel half"><div class="runtime-panel-header"><h2>个人资料</h2><span class="status-pill">${escapeHTML(state.account.role)}</span></div><form class="runtime-form" id="profileForm"><label class="form-field full"><span>用户名</span><input name="username" value="${escapeHTML(state.account.username)}" required minlength="3" maxlength="40"></label><label class="form-field full"><span>邮箱</span><input name="email" type="email" value="${escapeHTML(state.account.email)}" required></label><div class="runtime-actions full"><button class="primary-button">保存资料</button></div></form></section>
     <section class="runtime-panel half"><div class="runtime-panel-header"><h2>修改密码</h2><span class="status-pill warn">将撤销全部会话</span></div><form class="runtime-form" id="passwordForm"><input type="text" name="username" autocomplete="username" value="${escapeHTML(state.account.username)}" hidden><label class="form-field full"><span>当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" required></label><label class="form-field full"><span>新密码</span><input name="newPassword" type="password" autocomplete="new-password" minlength="8" required></label><label class="form-field full"><span>确认新密码</span><input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required></label><div class="runtime-actions full"><button class="primary-button">更新密码</button></div></form></section>
-    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>客户端设置同步</h2><span class="status-pill">${cloud ? "实时连接" : "不可用"}</span></div>${cloud ? `<form class="runtime-form" id="clientSettingsForm"><label class="form-field"><span>显示周末</span><select name="showWeekend"><option value="true" ${mobileSettings.showWeekend !== false ? "selected" : ""}>显示</option><option value="false" ${mobileSettings.showWeekend === false ? "selected" : ""}>隐藏</option></select></label><label class="form-field"><span>周数计算</span><select name="weekNumberMode"><option value="NATURAL" ${mobileSettings.weekNumberMode !== "SEMESTER" ? "selected" : ""}>自然周</option><option value="SEMESTER" ${mobileSettings.weekNumberMode === "SEMESTER" ? "selected" : ""}>学期周</option></select></label><label class="form-field"><span>新学期开始日期</span><input name="semesterWeekStartDate" type="date" value="${escapeHTML(mobileSettings.semesterWeekStartDate || "")}"></label><label class="form-field"><span>提醒</span><select name="reminderEnabled"><option value="true" ${mobileSettings.reminderEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.reminderEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>提前提醒（分钟）</span><input name="reminderMinutes" type="number" min="5" max="60" value="${Number(mobileSettings.reminderMinutes || 15)}"></label><label class="form-field"><span>保活级别</span><select name="keepAliveLevel"><option ${mobileSettings.keepAliveLevel === "ECO" ? "selected" : ""}>ECO</option><option ${mobileSettings.keepAliveLevel !== "ECO" && mobileSettings.keepAliveLevel !== "AGGRESSIVE" ? "selected" : ""}>BALANCED</option><option ${mobileSettings.keepAliveLevel === "AGGRESSIVE" ? "selected" : ""}>AGGRESSIVE</option></select></label><label class="form-field"><span>每日简报</span><select name="dailyBriefingEnabled"><option value="true" ${mobileSettings.dailyBriefingEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.dailyBriefingEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>简报时间</span><input name="dailyBriefingTime" type="time" value="${escapeHTML(mobileSettings.dailyBriefingTime || "20:00")}"></label><div class="runtime-actions full"><button class="primary-button">保存并同步</button><span>变更会实时通知 Web，并在客户端下次官方云同步时合并。</span></div></form>` : `<div class="empty-state"><strong>设置同步不可用</strong><span>${escapeHTML(cloudError)}</span></div>`}</section>
+    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>注销账号</h2><span class="status-pill warn">危险操作</span></div><form class="runtime-form" id="deleteAccountForm"><p class="full">注销后账号会立即退出所有设备，邮箱和用户名将被脱敏，无法再使用原账号登录。</p><label class="form-field"><span>当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" required></label><label class="form-field"><span>输入 DELETE 确认</span><input name="confirm" autocomplete="off" pattern="DELETE|注销账号" required></label><div class="runtime-actions full"><button class="quiet-button">注销账号</button></div></form></section>
+    <section class="runtime-panel full"><div class="runtime-panel-header"><h2>客户端设置同步</h2><span class="status-pill">${settingsSyncStatus}</span></div>${cloud ? `<form class="runtime-form" id="clientSettingsForm"><label class="form-field"><span>显示周末</span><select name="showWeekend"><option value="true" ${mobileSettings.showWeekend !== false ? "selected" : ""}>显示</option><option value="false" ${mobileSettings.showWeekend === false ? "selected" : ""}>隐藏</option></select></label><label class="form-field"><span>周数计算</span><select name="weekNumberMode"><option value="NATURAL" ${mobileSettings.weekNumberMode !== "SEMESTER" ? "selected" : ""}>自然周</option><option value="SEMESTER" ${mobileSettings.weekNumberMode === "SEMESTER" ? "selected" : ""}>学期周</option></select></label><label class="form-field"><span>新学期开始日期</span><input name="semesterWeekStartDate" type="date" value="${escapeHTML(mobileSettings.semesterWeekStartDate || "")}"></label><label class="form-field"><span>提醒</span><select name="reminderEnabled"><option value="true" ${mobileSettings.reminderEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.reminderEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>提前提醒（分钟）</span><input name="reminderMinutes" type="number" min="5" max="60" value="${Number(mobileSettings.reminderMinutes || 15)}"></label><label class="form-field"><span>保活级别</span><select name="keepAliveLevel"><option ${mobileSettings.keepAliveLevel === "ECO" ? "selected" : ""}>ECO</option><option ${mobileSettings.keepAliveLevel !== "ECO" && mobileSettings.keepAliveLevel !== "AGGRESSIVE" ? "selected" : ""}>BALANCED</option><option ${mobileSettings.keepAliveLevel === "AGGRESSIVE" ? "selected" : ""}>AGGRESSIVE</option></select></label><label class="form-field"><span>每日简报</span><select name="dailyBriefingEnabled"><option value="true" ${mobileSettings.dailyBriefingEnabled ? "selected" : ""}>启用</option><option value="false" ${!mobileSettings.dailyBriefingEnabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>简报时间</span><input name="dailyBriefingTime" type="time" value="${escapeHTML(mobileSettings.dailyBriefingTime || "20:00")}"></label><div class="runtime-actions full"><button class="primary-button">保存并同步</button><span>${membership.membership?.isMember ? "变更会实时通知 Web，并在客户端下次官方云同步时合并。" : "会员已过期，官方云仅保留设置项同步；课程数据不会继续跨端同步。"}</span></div></form>` : `<div class="empty-state"><strong>设置同步不可用</strong><span>${escapeHTML(cloudError)}</span></div>`}</section>
     ${isAdmin() ? `<section class="runtime-panel full"><div class="runtime-panel-header"><h2>系统运行设置</h2><span class="status-pill">管理员</span></div><form class="runtime-form" id="systemSettingsForm"><label class="form-field"><span>开放注册</span><select name="registration.enabled"><option value="true" ${settings.settings["registration.enabled"] !== "false" ? "selected" : ""}>启用</option><option value="false" ${settings.settings["registration.enabled"] === "false" ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>简报服务</span><select name="briefing.enabled"><option value="true" ${settings.settings["briefing.enabled"] !== "false" ? "selected" : ""}>启用</option><option value="false" ${settings.settings["briefing.enabled"] === "false" ? "selected" : ""}>关闭</option></select></label><label class="form-field full"><span>维护公告</span><textarea name="maintenance.message" placeholder="留空表示无公告">${escapeHTML(settings.settings["maintenance.message"] || "")}</textarea></label><div class="runtime-actions full"><button class="primary-button">保存系统设置</button></div></form></section>` : ""}
   </div></div>`;
   document.getElementById("profileForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { state.account = (await api("/api/v1/account/me", { method: "PATCH", body: JSON.stringify(data) })).account; syncAccountChrome(); toast("个人资料已更新"); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("passwordForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); if (data.newPassword !== data.confirmPassword) { toast("两次输入的新密码不一致", "error"); return; } try { await api("/api/v1/account/password", { method: "PUT", body: JSON.stringify({ currentPassword: data.currentPassword, newPassword: data.newPassword }) }); toast("密码已更新，请重新登录"); setTimeout(() => signOut(false), 900); } catch (error) { toast(error.message, "error"); } });
+  document.getElementById("deleteAccountForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); if (data.confirm !== "DELETE" && data.confirm !== "注销账号") { toast("请输入 DELETE 确认注销账号", "error"); return; } if (!confirm("确认注销账号？该操作会退出所有设备，且无法用原账号继续登录。")) return; try { await api("/api/v1/account/delete", { method: "POST", body: JSON.stringify({ currentPassword: data.currentPassword, confirm: data.confirm }) }); toast("账号已注销"); setTimeout(() => signOut(false), 500); } catch (error) { toast(error.message, "error"); } });
   const clientSettingsForm = document.getElementById("clientSettingsForm");
   state.settingsFormDirty = false;
   state.settingsDirtyFields.clear();

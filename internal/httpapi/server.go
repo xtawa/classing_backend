@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/account/me", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.updateAccount))))
 	mux.Handle("POST /api/v1/account/email/confirm", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.confirmEmailChange))))
 	mux.Handle("PUT /api/v1/account/password", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.changePassword))))
+	mux.Handle("POST /api/v1/account/delete", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.deleteAccount))))
 
 	mux.Handle("GET /api/v1/membership/status", s.requireAuth(http.HandlerFunc(s.membershipStatus)))
 	mux.Handle("POST /api/v1/membership/redeem", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.redeemAccountLimiter)(http.HandlerFunc(s.redeemMembership))))
