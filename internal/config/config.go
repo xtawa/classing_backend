@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -50,7 +51,6 @@ func Load() (Config, error) {
 		RefreshTokenTTL:        duration("REFRESH_TOKEN_TTL", 30*24*time.Hour),
 		ResetTokenTTL:          duration("RESET_TOKEN_TTL", 30*time.Minute),
 		EmailVerificationTTL:   duration("EMAIL_VERIFICATION_TTL", 10*time.Minute),
-		AllowedOrigins:         csv("CORS_ALLOWED_ORIGINS"),
 		BootstrapAdminUser:     env("BOOTSTRAP_ADMIN_USERNAME", "admin"),
 		BootstrapAdminEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
 		BootstrapAdminPass:     os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
@@ -109,7 +109,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.TrustedProxies = trusted
+	cfg.AllowedOrigins = defaultAllowedOrigins(csv("CORS_ALLOWED_ORIGINS"), cfg.PublicBaseURL)
 	return cfg, nil
+}
+
+func defaultAllowedOrigins(explicit []string, publicBaseURL string) []string {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	parsed, err := url.Parse(strings.TrimSpace(publicBaseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil
+	}
+	return []string{parsed.Scheme + "://" + parsed.Host}
 }
 
 func validateExplicitValues() error {

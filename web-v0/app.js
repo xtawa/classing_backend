@@ -70,11 +70,32 @@ function browserDeviceId() {
 
 function sleep(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
+async function safeFetch(path, options) {
+  try {
+    return await fetch(path, options);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("无法连接到后端，请检查当前控制台域名、网络连接或浏览器跨域限制");
+    }
+    throw error;
+  }
+}
+
+async function runButtonAction(button, action) {
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  try {
+    await action();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function api(path, options = {}, retry = true) {
   const headers = new Headers(options.headers || {});
   if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (state.session?.accessToken) headers.set("Authorization", `Bearer ${state.session.accessToken}`);
-  const response = await fetch(path, { ...options, headers });
+  const response = await safeFetch(path, { ...options, headers });
   if (response.status === 401 && retry && state.session?.refreshToken && !path.endsWith("/auth/refresh")) {
     if (await refreshSession()) return api(path, options, false);
   }
@@ -94,7 +115,7 @@ async function refreshSession() {
   if (state.refreshing) return state.refreshing;
   state.refreshing = (async () => {
     try {
-      const response = await fetch("/api/v1/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: state.session.refreshToken }) });
+      const response = await safeFetch("/api/v1/auth/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: state.session.refreshToken }) });
       if (!response.ok) throw new Error("refresh failed");
       const body = await response.json();
       saveSession(body.session);
@@ -221,7 +242,7 @@ function setAuthMode(mode) {
 
 async function prepareRegistrationSecurity() {
   try {
-    state.registrationConfig = await (await fetch("/api/v1/auth/registration/config")).json();
+    state.registrationConfig = await (await safeFetch("/api/v1/auth/registration/config")).json();
     if (!state.registrationConfig.turnstileRequired || !state.registrationConfig.turnstileSiteKey) return;
     if (!window.turnstile) {
       await new Promise((resolve, reject) => {
@@ -258,7 +279,7 @@ async function submitAuth(event) {
       payload.challengeId = state.registrationChallengeId;
       payload.verificationCode = document.getElementById("authVerificationCode").value;
     }
-    const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await safeFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.message || "认证失败");
     if (register && !body.session) {
@@ -405,8 +426,8 @@ async function renderBriefings() {
 content.innerHTML = `<div class="runtime-page">${hero("briefings", `<div class="hero-stat"><strong>${item.enabled ? escapeHTML(item.time) : "OFF"}</strong><span>${item.enabled ? escapeHTML(item.timezone) : "未启用"}</span></div>`)}
 <section class="runtime-panel"><form class="runtime-form" id="briefingForm"><label class="form-field"><span>启用状态</span><select name="enabled"><option value="true" ${item.enabled ? "selected" : ""}>启用</option><option value="false" ${!item.enabled ? "selected" : ""}>关闭</option></select></label><label class="form-field"><span>渠道</span><select name="channel"><option ${item.channel === "APP_NOTIFICATION" ? "selected" : ""}>APP_NOTIFICATION</option><option ${item.channel === "EMAIL" ? "selected" : ""}>EMAIL</option><option ${item.channel === "BOTH" ? "selected" : ""}>BOTH</option></select></label><label class="form-field"><span>时间</span><input name="time" type="time" value="${escapeHTML(item.time)}" required></label><label class="form-field"><span>时区</span><input name="timezone" value="${escapeHTML(item.timezone)}" required></label><div class="runtime-actions full"><button class="primary-button">保存配置</button><button class="tonal-button" type="button" id="testAppBriefing">发送 App 测试</button><button class="tonal-button" type="button" id="testEmailBriefing">发送邮件测试</button></div></form></section></div>`;
   document.getElementById("briefingForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget); try { await api("/api/v1/briefings/daily", { method: "PUT", body: JSON.stringify({ enabled: data.get("enabled") === "true", channel: data.get("channel"), time: data.get("time"), timezone: data.get("timezone") }) }); toast("每日简报配置已保存"); renderBriefings(); } catch (error) { toast(error.message, "error"); } });
-document.getElementById("testAppBriefing").addEventListener("click", async () => { try { await api("/api/v1/briefings/daily/test", { method: "POST", body: JSON.stringify({ channel: "APP_NOTIFICATION" }) }); toast("App 测试提醒已发送"); } catch (error) { toast(error.message, "error"); } });
-document.getElementById("testEmailBriefing").addEventListener("click", async () => { try { await api("/api/v1/briefings/daily/test", { method: "POST", body: JSON.stringify({ channel: "EMAIL" }) }); toast("邮件测试简报任务已进入队列"); } catch (error) { toast(error.message, "error"); } });
+document.getElementById("testAppBriefing").addEventListener("click", (event) => runButtonAction(event.currentTarget, async () => { try { await api("/api/v1/briefings/daily/test", { method: "POST", body: JSON.stringify({ channel: "APP_NOTIFICATION" }) }); toast("App 测试提醒已发送"); } catch (error) { toast(error.message, "error"); } }));
+document.getElementById("testEmailBriefing").addEventListener("click", (event) => runButtonAction(event.currentTarget, async () => { try { await api("/api/v1/briefings/daily/test", { method: "POST", body: JSON.stringify({ channel: "EMAIL" }) }); toast("邮件测试简报任务已进入队列"); } catch (error) { toast(error.message, "error"); } }));
 }
 
 async function renderReleases() {
@@ -529,7 +550,7 @@ function readMobileSettings(document) {
 
 async function fetchCloudDocument(retry = true, minimumVersion = 0, staleAttempt = 0) {
   const headers = { Authorization: `Bearer ${state.session.accessToken}`, Accept: "application/json" };
-  const response = await fetch("/api/v1/cloud/official/document", { headers });
+  const response = await safeFetch("/api/v1/cloud/official/document", { headers });
   if (response.status === 401 && retry && await refreshSession()) return fetchCloudDocument(false, minimumVersion, staleAttempt);
   const text = await response.text();
   if (!response.ok) {
@@ -570,7 +591,7 @@ async function saveMobileSettings(document, etag, values, attempt = 0, retryAuth
   if (deviceIndex >= 0) document.devices[deviceIndex] = device; else document.devices.push(device);
   document.changes = document.changes.slice(0, 100);
   document.updatedAt = now;
-  const response = await fetch("/api/v1/cloud/official/document", {
+  const response = await safeFetch("/api/v1/cloud/official/document", {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${state.session.accessToken}`,
@@ -642,7 +663,7 @@ async function startSettingsStream() {
   try {
     const headers = { Authorization: `Bearer ${state.session.accessToken}` };
     if (state.cloudEventVersion > 0) headers["Last-Event-ID"] = String(state.cloudEventVersion);
-    const response = await fetch("/api/v1/cloud/official/events", { headers, signal: controller.signal });
+    const response = await safeFetch("/api/v1/cloud/official/events", { headers, signal: controller.signal });
     if (response.status === 401 && await refreshSession()) { reconnectDelay = 0; return; }
     if (!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
