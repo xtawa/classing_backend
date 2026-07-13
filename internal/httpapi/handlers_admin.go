@@ -48,13 +48,14 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "ADMIN_SELF_LOCKOUT", "administrator cannot remove their own access")
 		return
 	}
-	user, err := s.store.AdminUpdateUser(r.Context(), targetID, strings.ToUpper(body.Role), strings.ToUpper(body.Status))
+	actorID := principal(r).User.ID
+	audit := s.auditContext(r, actorID, "ADMIN_USER_UPDATE", "USER", targetID, map[string]any{"role": strings.ToUpper(body.Role), "status": strings.ToUpper(body.Status)})
+	user, err := s.store.AdminUpdateUser(r.Context(), actorID, targetID, strings.ToUpper(body.Role), strings.ToUpper(body.Status), audit)
 	if err != nil {
 		writeStoreError(w, r, err, "ADMIN_USER")
 		return
 	}
 	s.refreshReplays.invalidateUser(user.ID)
-	s.audit(r, principal(r).User.ID, "ADMIN_USER_UPDATE", "USER", targetID, map[string]any{"role": user.Role, "status": user.Status})
 	writeJSON(w, http.StatusOK, map[string]any{"user": accountPayload(user)})
 }
 
@@ -85,7 +86,19 @@ func (s *Server) adminListRedeemCodes(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "REDEEM_CODE")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"codes": items, "total": total})
+	codes := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		masked := prefix(item.Code, 7)
+		if len(item.Code) > 4 {
+			masked += "••••" + item.Code[len(item.Code)-4:]
+		}
+		codes = append(codes, map[string]any{
+			"codeMasked": masked, "codeType": item.CodeType, "grantDays": item.GrantDays,
+			"maxRedemptions": item.MaxRedemptions, "currentRedemptions": item.CurrentRedemptions,
+			"expiresAt": item.ExpiresAt, "revokedAt": item.RevokedAt, "createdAt": item.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"codes": codes, "total": total})
 }
 
 func (s *Server) adminRevokeRedeemCode(w http.ResponseWriter, r *http.Request) {
@@ -114,14 +127,36 @@ func (s *Server) adminGrantMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.ExpiresAt == 0 && body.GrantDays > 0 {
-		body.ExpiresAt = time.Now().Add(time.Duration(body.GrantDays) * 24 * time.Hour).UnixMilli()
+		current, currentErr := s.store.Membership(r.Context(), body.UserID)
+		if currentErr != nil {
+			writeStoreError(w, r, currentErr, "MEMBERSHIP")
+			return
+		}
+		base := time.Now().UnixMilli()
+		if current.ExpiresAt > base {
+			base = current.ExpiresAt
+		}
+		body.ExpiresAt = time.UnixMilli(base).Add(time.Duration(body.GrantDays) * 24 * time.Hour).UnixMilli()
 	}
-	item, err := s.store.SetMembership(r.Context(), principal(r).User.ID, body.UserID, body.Tier, body.ExpiresAt, "GRANT")
+	if body.ExpiresAt <= time.Now().UnixMilli() {
+		writeError(w, r, http.StatusBadRequest, "MEMBERSHIP_EXPIRY_INVALID", "membership expiry must be in the future")
+		return
+	}
+	action := "GRANT"
+	if current, currentErr := s.store.Membership(r.Context(), body.UserID); currentErr == nil && current.ExpiresAt > time.Now().UnixMilli() {
+		if body.ExpiresAt > current.ExpiresAt {
+			action = "EXTEND"
+		} else if body.ExpiresAt < current.ExpiresAt {
+			action = "SHORTEN"
+		}
+	}
+	actorID := principal(r).User.ID
+	audit := s.auditContext(r, actorID, "MEMBERSHIP_"+action, "MEMBERSHIP", body.UserID, nil)
+	item, err := s.store.SetMembershipAudited(r.Context(), actorID, body.UserID, body.Tier, body.ExpiresAt, action, audit)
 	if err != nil {
 		writeStoreError(w, r, err, "MEMBERSHIP")
 		return
 	}
-	s.audit(r, principal(r).User.ID, "MEMBERSHIP_GRANT", "MEMBERSHIP", body.UserID, map[string]any{"expiresAt": body.ExpiresAt, "tier": body.Tier})
 	writeJSON(w, http.StatusOK, map[string]any{"membership": membershipPayload(item)})
 }
 
@@ -132,12 +167,13 @@ func (s *Server) adminRevokeMembership(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	item, err := s.store.SetMembership(r.Context(), principal(r).User.ID, body.UserID, "FREE", 0, "REVOKE")
+	actorID := principal(r).User.ID
+	audit := s.auditContext(r, actorID, "MEMBERSHIP_REVOKE", "MEMBERSHIP", body.UserID, nil)
+	item, err := s.store.SetMembershipAudited(r.Context(), actorID, body.UserID, "FREE", 0, "REVOKE", audit)
 	if err != nil {
 		writeStoreError(w, r, err, "MEMBERSHIP")
 		return
 	}
-	s.audit(r, principal(r).User.ID, "MEMBERSHIP_REVOKE", "MEMBERSHIP", body.UserID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"membership": membershipPayload(item)})
 }
 
@@ -236,16 +272,17 @@ func (s *Server) adminSetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed := map[string]bool{"registration.enabled": true, "briefing.enabled": true, "cloud.max_document_bytes": true, "maintenance.message": true}
-	for key, value := range body.Settings {
+	for key := range body.Settings {
 		if !allowed[key] {
 			writeError(w, r, http.StatusBadRequest, "SETTING_NOT_ALLOWED", "one or more settings cannot be changed at runtime")
 			return
 		}
-		if err := s.store.SetSetting(r.Context(), principal(r).User.ID, key, value); err != nil {
-			writeStoreError(w, r, err, "SETTINGS")
-			return
-		}
 	}
-	s.audit(r, principal(r).User.ID, "SYSTEM_SETTINGS_UPDATE", "SYSTEM_SETTINGS", "", map[string]any{"keys": len(body.Settings)})
+	actorID := principal(r).User.ID
+	audit := s.auditContext(r, actorID, "SYSTEM_SETTINGS_UPDATE", "SYSTEM_SETTINGS", "", nil)
+	if err := s.store.SetSettingsAudited(r.Context(), actorID, body.Settings, audit); err != nil {
+		writeStoreError(w, r, err, "SETTINGS")
+		return
+	}
 	s.adminListSettings(w, r)
 }

@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -60,6 +62,10 @@ func (s *Server) getCloudDocument(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if err == store.ErrNotFound {
 			w.Header().Set("ETag", `"0"`)
+			if etagMatches(r.Header.Get("If-None-Match"), 0) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 			writeCloudJSON(w, []byte(emptyCloudDocumentV2()))
 			return
 		}
@@ -67,6 +73,10 @@ func (s *Server) getCloudDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", `"`+strconv.FormatInt(item.Version, 10)+`"`)
+	if etagMatches(r.Header.Get("If-None-Match"), item.Version) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.Header().Set("Last-Modified", time.UnixMilli(item.UpdatedAt).UTC().Format(http.TimeFormat))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	payload := []byte(item.Payload)
@@ -97,6 +107,10 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "OFFICIAL_CLOUD_DOCUMENT_INVALID", "cloud document must be valid JSON")
 		return
 	}
+	if err := validateCloudDocument(payload); err != nil {
+		writeError(w, r, http.StatusBadRequest, "OFFICIAL_CLOUD_DOCUMENT_INVALID", err.Error())
+		return
+	}
 	userID := principal(r).User.ID
 	if !member {
 		current, err := s.store.CloudDocument(r.Context(), userID)
@@ -118,6 +132,15 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "IDEMPOTENCY_KEY_TOO_LONG", "idempotency key must be at most 128 characters")
 		return
 	}
+	expected, err := parseIfMatch(r.Header.Get("If-Match"))
+	if err != nil {
+		if errors.Is(err, errPreconditionRequired) {
+			writeError(w, r, http.StatusPreconditionRequired, "OFFICIAL_CLOUD_PRECONDITION_REQUIRED", "If-Match is required")
+		} else {
+			writeError(w, r, http.StatusBadRequest, "OFFICIAL_CLOUD_PRECONDITION_INVALID", "If-Match must be a quoted non-negative document version")
+		}
+		return
+	}
 	requestHash := store.HashRequest(payload)
 	if idempotencyKey != "" {
 		if record, err := s.store.Idempotency(r.Context(), userID, idempotencyKey); err == nil {
@@ -130,9 +153,12 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	expected := parseVersion(r.Header.Get("If-Match"))
-	item, err := s.store.PutCloudDocument(r.Context(), userID, payload, expected)
+	item, replay, err := s.store.PutCloudDocumentIdempotent(r.Context(), userID, payload, expected, idempotencyKey, requestHash, s.auditContext(r, userID, "OFFICIAL_CLOUD_WRITE", "CLOUD_DOCUMENT", userID, nil))
 	if err != nil {
+		if errors.Is(err, store.ErrIdempotencyKeyReused) {
+			writeError(w, r, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "idempotency key was already used for another payload")
+			return
+		}
 		if err == store.ErrConflict {
 			writeError(w, r, http.StatusPreconditionFailed, "OFFICIAL_CLOUD_VERSION_CONFLICT", "cloud document has changed; pull and merge before retrying")
 			return
@@ -140,15 +166,109 @@ func (s *Server) putCloudDocument(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "OFFICIAL_CLOUD")
 		return
 	}
+	if replay != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(replay.ResponseCode)
+		_, _ = w.Write([]byte(replay.ResponseBody))
+		return
+	}
 	body := []byte(`{"success":true,"version":` + strconv.FormatInt(item.Version, 10) + `}`)
 	w.Header().Set("ETag", `"`+strconv.FormatInt(item.Version, 10)+`"`)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if idempotencyKey != "" {
-		_ = s.store.SaveIdempotency(r.Context(), store.IdempotencyRecord{KeyValue: idempotencyKey, UserID: userID, RequestHash: requestHash, ResponseCode: http.StatusOK, ResponseBody: string(body), ExpiresAt: time.Now().Add(24 * time.Hour).UnixMilli()})
-	}
-	s.audit(r, userID, "OFFICIAL_CLOUD_WRITE", "CLOUD_DOCUMENT", userID, map[string]any{"version": item.Version, "bytes": len(payload)})
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+var errPreconditionRequired = errors.New("precondition required")
+
+func parseIfMatch(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, errPreconditionRequired
+	}
+	if strings.HasPrefix(value, "W/") || len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
+		return 0, store.ErrInvalid
+	}
+	version, err := strconv.ParseInt(value[1:len(value)-1], 10, 64)
+	if err != nil || version < 0 {
+		return 0, store.ErrInvalid
+	}
+	return version, nil
+}
+
+func etagMatches(value string, version int64) bool {
+	target := `"` + strconv.FormatInt(version, 10) + `"`
+	for _, candidate := range strings.Split(value, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == target || candidate == "W/"+target {
+			return true
+		}
+	}
+	return false
+}
+
+func validateCloudDocument(payload []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return errors.New("cloud document must be valid JSON")
+	}
+	root, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("cloud document root must be an object")
+	}
+	allowed := map[string]bool{"format": true, "updatedAt": true, "records": true, "changes": true, "devices": true}
+	for key := range root {
+		if !allowed[key] {
+			return errors.New("cloud document contains an unsupported top-level field")
+		}
+	}
+	if format, ok := root["format"].(string); !ok || format != "classing_cloud_sync_v2" {
+		return errors.New("cloud document format must be classing_cloud_sync_v2")
+	}
+	updatedAt, ok := root["updatedAt"].(json.Number)
+	if !ok {
+		return errors.New("cloud document updatedAt must be a non-negative integer")
+	}
+	if parsed, err := updatedAt.Int64(); err != nil || parsed < 0 {
+		return errors.New("cloud document updatedAt must be a non-negative integer")
+	}
+	records, ok := root["records"].(map[string]any)
+	if !ok || len(records) > 256 {
+		return errors.New("cloud document records must be an object with at most 256 domains")
+	}
+	changes, ok := root["changes"].([]any)
+	if !ok || len(changes) > 2048 {
+		return errors.New("cloud document changes must be an array with at most 2048 entries")
+	}
+	devices, ok := root["devices"].([]any)
+	if !ok || len(devices) > 64 {
+		return errors.New("cloud document devices must be an array with at most 64 entries")
+	}
+	if cloudJSONDepth(root, 1) > 32 {
+		return errors.New("cloud document nesting exceeds 32 levels")
+	}
+	return nil
+}
+
+func cloudJSONDepth(value any, depth int) int {
+	maxDepth := depth
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range typed {
+			if childDepth := cloudJSONDepth(child, depth+1); childDepth > maxDepth {
+				maxDepth = childDepth
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if childDepth := cloudJSONDepth(child, depth+1); childDepth > maxDepth {
+				maxDepth = childDepth
+			}
+		}
+	}
+	return maxDepth
 }
 
 func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +281,7 @@ func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	lastVersion := parseVersion(r.Header.Get("Last-Event-ID"))
+	lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
 	ticker := time.NewTicker(time.Second)
 	keepAlive := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
@@ -175,19 +295,17 @@ func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, ": keep-alive\n\n")
 			flusher.Flush()
 		case <-ticker.C:
-			item, err := s.store.CloudDocument(r.Context(), userID)
-			if err == store.ErrNotFound {
-				continue
-			}
+			events, err := s.store.RuntimeEvents(r.Context(), userID, lastEventID, 100)
 			if err != nil {
 				return
 			}
-			if item.Version <= lastVersion {
-				continue
+			for _, event := range events {
+				lastEventID = event.ID
+				_, _ = io.WriteString(w, "id: "+event.ID+"\nevent: "+event.EventType+"\ndata: "+event.Payload+"\n\n")
 			}
-			lastVersion = item.Version
-			_, _ = io.WriteString(w, "id: "+strconv.FormatInt(item.Version, 10)+"\nevent: settings\ndata: {\"version\":"+strconv.FormatInt(item.Version, 10)+",\"updatedAt\":"+strconv.FormatInt(item.UpdatedAt, 10)+"}\n\n")
-			flusher.Flush()
+			if len(events) > 0 {
+				flusher.Flush()
+			}
 		}
 	}
 }

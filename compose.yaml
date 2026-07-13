@@ -42,12 +42,20 @@ services:
       MAX_RELEASE_ARTIFACT_BYTES: ${MAX_RELEASE_ARTIFACT_BYTES:-262144000}
       CLASSING_SMTP_PASSWORD: ${CLASSING_SMTP_PASSWORD:-}
       EMAIL_VERIFICATION_TTL: ${EMAIL_VERIFICATION_TTL:-10m}
+      EXPOSE_VERIFICATION_CODE: "false"
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      TURNSTILE_REQUIRED: ${TURNSTILE_REQUIRED:-false}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.0/8,::1/128}
     ports:
       - "127.0.0.1:${CLASSING_PORT:-8080}:8080"
     volumes:
       - classing-releases:/data/releases
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
       interval: 15s

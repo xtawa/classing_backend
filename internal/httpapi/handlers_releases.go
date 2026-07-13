@@ -36,12 +36,27 @@ func (s *Server) publicAnnouncements(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) publicLatestRelease(w http.ResponseWriter, r *http.Request) {
-	platform := r.URL.Query().Get("platform")
+	platform := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("platform")))
 	if platform == "" {
 		platform = model.ReleasePlatformMobile
 	}
-	channel := r.URL.Query().Get("channel")
-	currentVersionCode, _ := strconv.ParseInt(r.URL.Query().Get("versionCode"), 10, 64)
+	channel := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("channel")))
+	if channel == "" {
+		channel = model.ReleaseChannelStable
+	}
+	if platform != model.ReleasePlatformMobile && platform != model.ReleasePlatformWear || channel != model.ReleaseChannelStable && channel != model.ReleaseChannelBeta {
+		writeError(w, r, http.StatusBadRequest, "RELEASE_QUERY_INVALID", "platform and channel must be supported values")
+		return
+	}
+	currentVersionCode := int64(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("versionCode")); raw != "" {
+		var parseErr error
+		currentVersionCode, parseErr = strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || currentVersionCode < 0 {
+			writeError(w, r, http.StatusBadRequest, "RELEASE_VERSION_INVALID", "versionCode must be a non-negative integer")
+			return
+		}
+	}
 	item, err := s.store.LatestRelease(r.Context(), platform, channel)
 	if errors.Is(err, store.ErrNotFound) {
 		writeJSON(w, http.StatusOK, map[string]any{"updateAvailable": false, "release": nil})
@@ -51,8 +66,15 @@ func (s *Server) publicLatestRelease(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, r, err, "RELEASE")
 		return
 	}
+	etag := `"` + item.ID + `-` + strconv.FormatInt(item.VersionCode, 10) + `"`
+	w.Header().Set("ETag", etag)
+	if etagMatches(r.Header.Get("If-None-Match"), item.VersionCode) || strings.TrimSpace(r.Header.Get("If-None-Match")) == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"updateAvailable": currentVersionCode < item.VersionCode,
+		"forceUpdate":     currentVersionCode < item.VersionCode && (currentVersionCode < item.MinSupportedVersionCode || item.Mandatory != 0),
 		"release":         releasePayload(item),
 	})
 }
@@ -76,6 +98,10 @@ func (s *Server) publicDownloadRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	if info.Size() != item.ArtifactSize {
 		writeError(w, r, http.StatusConflict, "RELEASE_ARTIFACT_MISMATCH", "release artifact does not match recorded metadata")
+		return
+	}
+	if err := verifyReleaseArtifact(s.cfg.ReleaseStorageDir, &item); err != nil {
+		writeError(w, r, http.StatusConflict, "RELEASE_ARTIFACT_MISMATCH", err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", item.ArtifactMimeType)
@@ -198,6 +224,10 @@ func (s *Server) adminUploadRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "RELEASE_STORAGE_FAILED", "release storage could not be prepared")
 		return
 	}
+	if available, err := storageAvailableBytes(s.cfg.ReleaseStorageDir); err != nil || available < uint64(s.cfg.MaxReleaseArtifactSize+64*1024*1024) {
+		writeError(w, r, http.StatusInsufficientStorage, "RELEASE_STORAGE_CAPACITY", "release storage does not have enough free space")
+		return
+	}
 	storageName := releaseID + ".apk"
 	temp, err := os.CreateTemp(s.cfg.ReleaseStorageDir, releaseID+"-*.upload")
 	if err != nil {
@@ -208,8 +238,9 @@ func (s *Server) adminUploadRelease(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(tempPath)
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(temp, hash), io.LimitReader(upload, s.cfg.MaxReleaseArtifactSize+1))
+	syncErr := temp.Sync()
 	closeErr := temp.Close()
-	if copyErr != nil || closeErr != nil || written < 1 || written > s.cfg.MaxReleaseArtifactSize {
+	if copyErr != nil || syncErr != nil || closeErr != nil || written < 1 || written > s.cfg.MaxReleaseArtifactSize {
 		writeError(w, r, http.StatusBadRequest, "RELEASE_ARTIFACT_INVALID", "artifact is empty, too large, or could not be stored")
 		return
 	}
@@ -220,6 +251,11 @@ func (s *Server) adminUploadRelease(w http.ResponseWriter, r *http.Request) {
 	finalPath := filepath.Join(s.cfg.ReleaseStorageDir, storageName)
 	if err := os.Rename(tempPath, finalPath); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "RELEASE_STORAGE_FAILED", "release artifact could not be finalized")
+		return
+	}
+	if err := syncStorageDirectory(s.cfg.ReleaseStorageDir); err != nil {
+		_ = os.Remove(finalPath)
+		writeError(w, r, http.StatusInternalServerError, "RELEASE_STORAGE_FAILED", "release storage metadata could not be synchronized")
 		return
 	}
 	item, err := s.store.CreateRelease(r.Context(), model.AppRelease{
@@ -265,13 +301,26 @@ func (s *Server) adminPublishRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminDeleteRelease(w http.ResponseWriter, r *http.Request) {
-	auditCtx := s.auditContext(r, principal(r).User.ID, "RELEASE_DELETE", "RELEASE", r.PathValue("id"), nil)
-	item, err := s.store.DeleteRelease(r.Context(), r.PathValue("id"), auditCtx)
+	id := r.PathValue("id")
+	item, err := s.store.Release(r.Context(), id)
 	if err != nil {
 		writeStoreError(w, r, err, "RELEASE")
 		return
 	}
-	if err := os.Remove(filepath.Join(s.cfg.ReleaseStorageDir, item.ArtifactStorageName)); err != nil && !os.IsNotExist(err) {
+	finalPath := filepath.Join(s.cfg.ReleaseStorageDir, item.ArtifactStorageName)
+	quarantinePath := finalPath + ".quarantine-" + id
+	if err := os.Rename(finalPath, quarantinePath); err != nil {
+		writeError(w, r, http.StatusConflict, "RELEASE_ARTIFACT_QUARANTINE_FAILED", "release artifact could not be isolated for deletion")
+		return
+	}
+	auditCtx := s.auditContext(r, principal(r).User.ID, "RELEASE_DELETE", "RELEASE", id, nil)
+	_, err = s.store.DeleteRelease(r.Context(), id, auditCtx)
+	if err != nil {
+		_ = os.Rename(quarantinePath, finalPath)
+		writeStoreError(w, r, err, "RELEASE")
+		return
+	}
+	if err := os.Remove(quarantinePath); err != nil && !os.IsNotExist(err) {
 		s.log.Warn("cleanup release artifact", "error", err, "releaseId", item.ID, "storageName", item.ArtifactStorageName)
 	}
 	w.WriteHeader(http.StatusNoContent)

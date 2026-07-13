@@ -47,7 +47,11 @@ func (s *Store) ClaimBriefingJob(ctx context.Context) (ClaimedJob, error) {
 	}
 	defer tx.Rollback()
 	var item ClaimedJob
-	err = tx.GetContext(ctx, &item, s.rebind(`SELECT j.*, u.email, u.username FROM briefing_jobs j JOIN users u ON u.id = j.user_id WHERE j.status IN ('PENDING', 'RETRY') AND j.scheduled_at <= ? ORDER BY j.scheduled_at ASC LIMIT 1`), nowMillis())
+	claimQuery := `SELECT j.*, u.email, u.username FROM briefing_jobs j JOIN users u ON u.id = j.user_id WHERE j.status IN ('PENDING', 'RETRY') AND j.scheduled_at <= ? ORDER BY j.scheduled_at ASC LIMIT 1`
+	if s.dialect == "pgx" {
+		claimQuery += ` FOR UPDATE OF j SKIP LOCKED`
+	}
+	err = tx.GetContext(ctx, &item, s.rebind(claimQuery), nowMillis())
 	if err != nil {
 		return ClaimedJob{}, normalizeDBError(err)
 	}
@@ -63,6 +67,10 @@ func (s *Store) ClaimBriefingJob(ctx context.Context) (ClaimedJob, error) {
 }
 
 func (s *Store) AcquireMailbox(ctx context.Context, usageDate string) (model.Mailbox, error) {
+	return s.AcquireMailboxExcluding(ctx, usageDate, nil)
+}
+
+func (s *Store) AcquireMailboxExcluding(ctx context.Context, usageDate string, excluded map[string]bool) (model.Mailbox, error) {
 	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return model.Mailbox{}, err
@@ -71,11 +79,38 @@ func (s *Store) AcquireMailbox(ctx context.Context, usageDate string) (model.Mai
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET used_today = 0, usage_date = ?, updated_at = ? WHERE usage_date <> ?`), usageDate, nowMillis(), usageDate); err != nil {
 		return model.Mailbox{}, err
 	}
-	var item model.Mailbox
-	if err := tx.GetContext(ctx, &item, s.rebind(`SELECT * FROM mailboxes WHERE enabled = 1 AND used_today < daily_quota ORDER BY used_today ASC, created_at ASC LIMIT 1`)); err != nil {
-		return model.Mailbox{}, normalizeDBError(err)
+	items := []model.Mailbox{}
+	mailboxQuery := `SELECT * FROM mailboxes WHERE enabled = 1 AND used_today < daily_quota ORDER BY used_today ASC, created_at ASC`
+	if s.dialect == "pgx" {
+		mailboxQuery += ` FOR UPDATE SKIP LOCKED`
 	}
+	if err := tx.SelectContext(ctx, &items, s.rebind(mailboxQuery)); err != nil {
+		return model.Mailbox{}, err
+	}
+	var item model.Mailbox
+	for _, candidate := range items {
+		if !excluded[candidate.ID] {
+			item = candidate
+			break
+		}
+	}
+	if item.ID == "" {
+		return model.Mailbox{}, ErrNotFound
+	}
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET used_today = used_today + 1, updated_at = ? WHERE id = ? AND used_today < daily_quota`), nowMillis(), item.ID)
+	if err != nil {
+		return model.Mailbox{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return model.Mailbox{}, ErrConflict
+	}
+	item.UsedToday++
 	return item, tx.Commit()
+}
+
+func (s *Store) ReleaseMailboxReservation(ctx context.Context, mailboxID, usageDate string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET used_today = CASE WHEN used_today > 0 THEN used_today - 1 ELSE 0 END, updated_at = ? WHERE id = ? AND usage_date = ?`), nowMillis(), mailboxID, usageDate)
+	return err
 }
 
 func (s *Store) CompleteBriefingJob(ctx context.Context, jobID, mailboxID string) error {
@@ -86,9 +121,6 @@ func (s *Store) CompleteBriefingJob(ctx context.Context, jobID, mailboxID string
 	defer tx.Rollback()
 	now := nowMillis()
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE briefing_jobs SET status = 'SENT', provider_mailbox_id = ?, payload = '', updated_at = ? WHERE id = ?`), mailboxID, now, jobID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE mailboxes SET used_today = used_today + 1, updated_at = ? WHERE id = ?`), now, mailboxID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -139,6 +171,11 @@ func (s *Store) UpsertBriefing(ctx context.Context, userID string, enabled bool,
 	if err != nil {
 		return model.BriefingSubscription{}, err
 	}
+	if !enabled {
+		if _, err := s.db.ExecContext(ctx, s.rebind(`UPDATE briefing_jobs SET status = 'CANCELLED', payload = '', last_error = '', updated_at = ? WHERE user_id = ? AND status IN ('PENDING', 'RETRY') AND channel IN ('EMAIL', 'EMAIL_TEST')`), now, userID); err != nil {
+			return model.BriefingSubscription{}, err
+		}
+	}
 	return s.Briefing(ctx, userID)
 }
 
@@ -152,6 +189,23 @@ func (s *Store) QueueBriefingJob(ctx context.Context, userID, targetDate, channe
 	item := model.BriefingJob{ID: ids.New("job"), UserID: userID, TargetDate: targetDate, Channel: channel, Status: "PENDING", ScheduledAt: scheduledAt, CreatedAt: now, UpdatedAt: now}
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`), item.ID, userID, targetDate, channel, scheduledAt, now, now)
 	return item, normalizeDBError(err)
+}
+
+func (s *Store) ScheduleBriefingJob(ctx context.Context, userID, targetDate, channel string, scheduledAt int64) (model.BriefingJob, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return model.BriefingJob{}, err
+	}
+	defer tx.Rollback()
+	now := nowMillis()
+	item := model.BriefingJob{ID: ids.New("job"), UserID: userID, TargetDate: targetDate, Channel: channel, Status: "PENDING", ScheduledAt: scheduledAt, CreatedAt: now, UpdatedAt: now}
+	if _, err = tx.ExecContext(ctx, s.rebind(`INSERT INTO briefing_jobs (id, user_id, target_date, channel, status, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`), item.ID, userID, targetDate, channel, scheduledAt, now, now); err != nil {
+		return model.BriefingJob{}, normalizeDBError(err)
+	}
+	if _, err = tx.ExecContext(ctx, s.rebind(`UPDATE briefing_subscriptions SET last_scheduled_at = ?, updated_at = ? WHERE user_id = ? AND enabled = 1`), scheduledAt, now, userID); err != nil {
+		return model.BriefingJob{}, err
+	}
+	return item, tx.Commit()
 }
 
 func (s *Store) QueuePasswordResetJob(ctx context.Context, userID, token string, expiresAt int64) (model.BriefingJob, error) {
@@ -256,6 +310,14 @@ func (s *Store) ListMailboxes(ctx context.Context) ([]model.Mailbox, error) {
 	items := []model.Mailbox{}
 	err := s.db.SelectContext(ctx, &items, `SELECT * FROM mailboxes ORDER BY created_at DESC`)
 	return items, err
+}
+
+func (s *Store) MailReady(ctx context.Context) (bool, error) {
+	var count int
+	if err := s.db.GetContext(ctx, &count, `SELECT COUNT(*) FROM mailboxes WHERE enabled = 1 AND daily_quota > 0`); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (s *Store) CreateMailbox(ctx context.Context, item model.Mailbox) (model.Mailbox, error) {

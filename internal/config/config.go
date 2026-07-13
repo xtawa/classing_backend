@@ -29,6 +29,7 @@ type Config struct {
 	ExposeVerificationCode bool
 	TurnstileSiteKey       string
 	TurnstileSecret        string
+	TurnstileRequired      bool
 	MaxCloudDocumentSize   int64
 	PublicBaseURL          string
 	SchedulerEnabled       bool
@@ -38,6 +39,9 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	if err := validateExplicitValues(); err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		Environment:            env("APP_ENV", "development"),
 		HTTPAddr:               env("HTTP_ADDR", ":8080"),
@@ -54,6 +58,7 @@ func Load() (Config, error) {
 		ExposeVerificationCode: boolean("EXPOSE_VERIFICATION_CODE", false),
 		TurnstileSiteKey:       strings.TrimSpace(os.Getenv("TURNSTILE_SITE_KEY")),
 		TurnstileSecret:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET")),
+		TurnstileRequired:      boolean("TURNSTILE_REQUIRED", false),
 		MaxCloudDocumentSize:   int64(integer("MAX_CLOUD_DOCUMENT_BYTES", 2*1024*1024)),
 		PublicBaseURL:          strings.TrimRight(env("PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 		SchedulerEnabled:       boolean("SCHEDULER_ENABLED", true),
@@ -71,6 +76,11 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseDriver != "pgx" && cfg.DatabaseDriver != "sqlite" {
 		return Config{}, fmt.Errorf("DATABASE_DRIVER must be pgx or sqlite")
+	}
+	if cfg.Environment == "production" {
+		if strings.TrimSpace(os.Getenv("DATABASE_DRIVER")) == "" || strings.TrimSpace(os.Getenv("DATABASE_URL")) == "" {
+			return Config{}, errors.New("DATABASE_DRIVER and DATABASE_URL must be explicitly configured in production")
+		}
 	}
 
 	secret, err := loadSecret()
@@ -91,12 +101,42 @@ func Load() (Config, error) {
 	if (cfg.TurnstileSiteKey == "") != (cfg.TurnstileSecret == "") {
 		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET must be configured together")
 	}
+	if cfg.TurnstileRequired && cfg.TurnstileSecret == "" {
+		return Config{}, errors.New("TURNSTILE_SITE_KEY and TURNSTILE_SECRET are required when TURNSTILE_REQUIRED=true")
+	}
 	trusted, err := parseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.TrustedProxies = trusted
 	return cfg, nil
+}
+
+func validateExplicitValues() error {
+	for _, key := range []string{"ACCESS_TOKEN_TTL", "REFRESH_TOKEN_TTL", "RESET_TOKEN_TTL", "EMAIL_VERIFICATION_TTL"} {
+		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+			value, err := time.ParseDuration(raw)
+			if err != nil || value <= 0 {
+				return fmt.Errorf("%s must be a positive duration", key)
+			}
+		}
+	}
+	for _, key := range []string{"MAX_CLOUD_DOCUMENT_BYTES", "MAX_RELEASE_ARTIFACT_BYTES"} {
+		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value <= 0 {
+				return fmt.Errorf("%s must be a positive integer", key)
+			}
+		}
+	}
+	for _, key := range []string{"EXPOSE_RESET_TOKEN", "EXPOSE_VERIFICATION_CODE", "SCHEDULER_ENABLED", "TURNSTILE_REQUIRED"} {
+		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
+			if _, err := strconv.ParseBool(raw); err != nil {
+				return fmt.Errorf("%s must be true or false", key)
+			}
+		}
+	}
+	return nil
 }
 
 func parseTrustedProxies(raw string) ([]*net.IPNet, error) {

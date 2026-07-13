@@ -73,6 +73,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	api.MarkShuttingDown()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

@@ -106,3 +106,11 @@
 | 账户 | 30 次/分钟 | `429 ACCOUNT_RATE_LIMITED` |
 
 429 响应携带 `Retry-After: 60`。正常同步频率（≤ `EVERY_15_MIN`）远低于账户限制；若因并发冲突（409/412）触发自动重试，重试次数应 ≤ 3 并带退避。
+
+## 10. v2 文档与条件请求（2026-07-13）
+
+- 顶层字段仅允许 `format`、`updatedAt`、`records`、`changes`、`devices`；`format` 必须是 `classing_cloud_sync_v2`，最大嵌套深度 32。
+- `GET /document` 返回带引号的版本 ETag；`If-None-Match` 命中时返回 304。
+- `PUT /document` 必须发送 `If-Match: "<version>"`，首次创建发送 `"0"`；缺失返回 428，非法返回 400，版本冲突返回 412。
+- 同一 `Idempotency-Key` 与相同 payload 返回首次响应；同 key 不同 payload 返回 409。文档、幂等响应和审计在同一数据库事务提交。
+- `/events` 使用持久化、可排序的事件 ID；客户端保存每条 SSE 的 `id` 并在重连时发送 `Last-Event-ID`。服务端按顺序补发该用户的 `client-settings` 事件和全局 `system-settings` 事件，并每 20 秒发送心跳。正常 EOF 或 401 后客户端应带最近事件 ID 重新鉴权连接。

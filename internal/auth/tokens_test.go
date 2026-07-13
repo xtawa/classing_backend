@@ -11,7 +11,7 @@ import (
 func TestTokenRoundTripAndTamperDetection(t *testing.T) {
 	manager := NewManager([]byte("01234567890123456789012345678901"), time.Minute)
 	user := model.User{ID: "usr_test", Role: model.RoleAdmin, AuthEpoch: 42}
-	token, _, err := manager.Issue(user)
+	token, _, err := manager.Issue(user, "ses_test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +19,7 @@ func TestTokenRoundTripAndTamperDetection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claims.Subject != user.ID || claims.Role != user.Role || claims.Epoch != user.AuthEpoch {
+	if claims.Subject != user.ID || claims.Session != "ses_test" || claims.Role != user.Role || claims.Epoch != user.AuthEpoch {
 		t.Fatalf("unexpected claims: %+v", claims)
 	}
 	parts := strings.Split(token, ".")

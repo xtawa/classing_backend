@@ -153,3 +153,10 @@
 - `AUTH_USERNAME_ALREADY_EXISTS`
 - `IP_RATE_LIMITED` — 同一 IP 对敏感接口的请求超过 60 次/分钟（HTTP 429，携带 `Retry-After: 60`）
 - `ACCOUNT_RATE_LIMITED` — 同一账户密码修改超过 10 次/分钟（HTTP 429，携带 `Retry-After: 60`）
+
+## 10. 可撤销会话迁移（2026-07-13）
+
+- access token 必须包含服务端会话 ID（JWT `sid`）；缺少 `sid` 的历史 token 不再接受，升级后所有用户需要重新登录。
+- refresh token 轮换绑定同一会话；旧 token 在轮换窗口外被再次使用时，服务端撤销该会话并返回 `AUTH_REFRESH_REVOKED`。
+- `POST /auth/logout` 只撤销当前 `sid`。密码重置、账户禁用、角色或状态高风险变更会撤销该用户全部 access/refresh 会话。
+- 客户端遇到 `AUTH_SESSION_REVOKED` 或 `AUTH_REFRESH_REVOKED` 必须原子清理本地 access/refresh token 并回到登录页。

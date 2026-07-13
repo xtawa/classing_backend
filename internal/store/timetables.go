@@ -4,24 +4,69 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/xtawa/classing-backend/internal/ids"
 	"github.com/xtawa/classing-backend/internal/model"
 )
 
-func (s *Store) CreateTimetable(ctx context.Context, ownerID, name, timezone, semesterStart string, weekCount int, document json.RawMessage) (model.TimetableProject, error) {
+const maxTimetableDocumentBytes = 2 * 1024 * 1024
+
+func validateTimetableFields(name, timezone, semesterStart string, weekCount int, document json.RawMessage, documentRequired bool) error {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 100 {
-		return model.TimetableProject{}, ErrInvalid
+	if name == "" || len([]rune(name)) > 100 {
+		return ErrInvalid
 	}
 	if timezone == "" {
 		timezone = "Asia/Shanghai"
 	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return ErrInvalid
+	}
+	if semesterStart != "" {
+		if _, err := time.Parse("2006-01-02", semesterStart); err != nil {
+			return ErrInvalid
+		}
+	}
 	if weekCount < 1 || weekCount > 60 {
+		return ErrInvalid
+	}
+	if len(document) == 0 && !documentRequired {
+		return nil
+	}
+	if len(document) == 0 || len(document) > maxTimetableDocumentBytes || !json.Valid(document) {
+		return ErrInvalid
+	}
+	var root map[string]any
+	if err := json.Unmarshal(document, &root); err != nil {
+		return ErrInvalid
+	}
+	lessons, ok := root["lessons"].([]any)
+	if !ok || len(lessons) > 2000 {
+		return ErrInvalid
+	}
+	if exceptions, exists := root["exceptions"]; exists {
+		items, ok := exceptions.([]any)
+		if !ok || len(items) > 2000 {
+			return ErrInvalid
+		}
+	}
+	return nil
+}
+
+func (s *Store) CreateTimetable(ctx context.Context, ownerID, name, timezone, semesterStart string, weekCount int, document json.RawMessage) (model.TimetableProject, error) {
+	name = strings.TrimSpace(name)
+	if timezone == "" {
+		timezone = "Asia/Shanghai"
+	}
+	if weekCount == 0 {
 		weekCount = 20
 	}
-	if len(document) == 0 || !json.Valid(document) {
+	if len(document) == 0 {
 		document = json.RawMessage(`{"lessons":[],"exceptions":[]}`)
+	}
+	if err := validateTimetableFields(name, timezone, semesterStart, weekCount, document, true); err != nil {
+		return model.TimetableProject{}, err
 	}
 	now := nowMillis()
 	item := model.TimetableProject{ID: ids.New("ttb"), OwnerID: ownerID, Name: name, Timezone: timezone, SemesterStart: semesterStart, WeekCount: weekCount, Document: string(document), Version: 1, CreatedAt: now, UpdatedAt: now}
@@ -30,11 +75,27 @@ func (s *Store) CreateTimetable(ctx context.Context, ownerID, name, timezone, se
 }
 
 func (s *Store) ListTimetables(ctx context.Context, userID string, admin bool, limit, offset int) ([]model.TimetableProject, int, error) {
+	return s.ListTimetablesFiltered(ctx, userID, admin, limit, offset, "", "")
+}
+
+func (s *Store) ListTimetablesFiltered(ctx context.Context, userID string, admin bool, limit, offset int, query, ownerID string) ([]model.TimetableProject, int, error) {
 	where := ""
 	args := []any{}
 	if !admin {
 		where = ` WHERE owner_id = ?`
 		args = append(args, userID)
+	} else if strings.TrimSpace(ownerID) != "" {
+		where = ` WHERE owner_id = ?`
+		args = append(args, strings.TrimSpace(ownerID))
+	}
+	if strings.TrimSpace(query) != "" {
+		if where == "" {
+			where = ` WHERE `
+		} else {
+			where += ` AND `
+		}
+		where += `LOWER(name) LIKE ?`
+		args = append(args, "%"+strings.ToLower(strings.TrimSpace(query))+"%")
 	}
 	var total int
 	if err := s.db.GetContext(ctx, &total, s.rebind(`SELECT COUNT(*) FROM timetable_projects`+where), args...); err != nil {
@@ -82,10 +143,10 @@ func (s *Store) UpdateTimetable(ctx context.Context, id, userID string, admin bo
 	}
 	doc := current.Document
 	if len(document) > 0 {
-		if !json.Valid(document) {
-			return model.TimetableProject{}, ErrInvalid
-		}
 		doc = string(document)
+	}
+	if err := validateTimetableFields(strings.TrimSpace(name), timezone, semesterStart, weekCount, json.RawMessage(doc), true); err != nil {
+		return model.TimetableProject{}, err
 	}
 	result, err := s.db.ExecContext(ctx, s.rebind(`UPDATE timetable_projects SET name = ?, timezone = ?, semester_start = ?, week_count = ?, document = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?`), strings.TrimSpace(name), timezone, semesterStart, weekCount, doc, nowMillis(), id, current.Version)
 	if err != nil {

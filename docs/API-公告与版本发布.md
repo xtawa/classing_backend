@@ -153,7 +153,7 @@ Content-Type: multipart/form-data
 - `POST /api/v1/admin/releases/{id}/publish`
 - `DELETE /api/v1/admin/releases/{id}`
 
-发布前服务端会重新校验磁盘文件的存在性、大小与 SHA-256，与记录不一致时返回 `409 RELEASE_ARTIFACT_MISMATCH` 且不改变发布状态。删除版本会先删除数据库记录（事务），再 best-effort 删除 APK 文件；文件清理失败会产生孤儿文件，但不影响数据库一致性。发布、上传、删除和公告变更都会进入审计日志。
+发布前服务端会重新校验磁盘文件的存在性、大小与 SHA-256，与记录不一致时返回 `409 RELEASE_ARTIFACT_MISMATCH` 且不改变发布状态。删除版本会先把 APK 原子改名到隔离路径，再在数据库事务中删除记录与写入审计；事务失败会恢复原文件，事务成功后再清理隔离文件。发布、上传、删除和公告变更都会进入审计日志。
 
 ## 3. 存储与限制
 
@@ -178,4 +178,15 @@ MAX_RELEASE_ARTIFACT_BYTES=262144000
 - `RELEASE_VERSION_INVALID`
 - `RELEASE_CONFLICT`
 - `RELEASE_STORAGE_FAILED`
+- `RELEASE_STORAGE_CAPACITY` — 可用磁盘空间不足（HTTP 507）
+- `RELEASE_ARTIFACT_QUARANTINE_FAILED` — 删除前无法隔离文件（HTTP 409）
 - `CLIENT_RATE_LIMITED` — 公开接口（公告/版本查询/下载）超过 3 次/分钟/IP+路径（HTTP 429，携带 `Retry-After: 60`）
+
+## 5. Stable/Beta 与条件请求
+
+- `channel` 仅允许 `STABLE` 或 `BETA`，省略时为 `STABLE`；响应中的 `release.channel` 是实际查询通道。
+- `versionCode` 必须为非负整数。`forceUpdate` 仅在存在更新且版本低于最低支持版本，或该更新标记为 mandatory 时为 `true`。
+- latest 响应带 `ETag`；客户端可发送 `If-None-Match`，未变化时返回 304。
+- APK 下载支持标准 `Range`/206、`Content-Length` 和基于 SHA-256 的 ETag；服务端在每次下载前复核记录大小与 SHA-256。
+- 上传在写入前检查磁盘余量，写入临时文件后执行文件同步、原子改名和目录同步。
+- 只读审计：`docker compose exec classing /app/classing-storage-audit`；仅在人工确认报告后才可显式执行 `--delete-orphans`。缺失或损坏文件会返回退出码 2，孤儿文件默认只报告不删除。

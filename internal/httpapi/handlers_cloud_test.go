@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -39,5 +41,50 @@ func TestMergeCloudChangesIsStableAndKeepsNewestVersion(t *testing.T) {
 	repeated := mergeCloudChanges(merged, []any{newer, anonymous})
 	if !reflect.DeepEqual(repeated, merged) {
 		t.Fatalf("repeated merge was not stable: first=%+v repeated=%+v", merged, repeated)
+	}
+}
+
+func TestValidateCloudDocumentContract(t *testing.T) {
+	valid := []byte(emptyCloudDocumentV2())
+	if err := validateCloudDocument(valid); err != nil {
+		t.Fatalf("valid document rejected: %v", err)
+	}
+	cases := []string{
+		`[]`,
+		`{"format":"legacy","updatedAt":0,"records":{},"changes":[],"devices":[]}`,
+		`{"format":"classing_cloud_sync_v2","updatedAt":-1,"records":{},"changes":[],"devices":[]}`,
+		`{"format":"classing_cloud_sync_v2","updatedAt":0,"records":[],"changes":[],"devices":[]}`,
+		`{"format":"classing_cloud_sync_v2","updatedAt":0,"records":{},"changes":[],"devices":[],"secret":true}`,
+	}
+	for _, payload := range cases {
+		if err := validateCloudDocument([]byte(payload)); err == nil {
+			t.Errorf("invalid document accepted: %s", payload)
+		}
+	}
+
+	deep := any("leaf")
+	for i := 0; i < 33; i++ {
+		deep = map[string]any{"next": deep}
+	}
+	payload, err := json.Marshal(map[string]any{"format": "classing_cloud_sync_v2", "updatedAt": 0, "records": map[string]any{"mobile.settings": deep}, "changes": []any{}, "devices": []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCloudDocument(payload); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("deep document error = %v, want nesting error", err)
+	}
+}
+
+func TestCloudETagParsers(t *testing.T) {
+	if version, err := parseIfMatch(`"12"`); err != nil || version != 12 {
+		t.Fatalf("parseIfMatch = %d, %v", version, err)
+	}
+	for _, invalid := range []string{"", "12", `W/"12"`, `"-1"`, `"x"`} {
+		if _, err := parseIfMatch(invalid); err == nil {
+			t.Errorf("invalid If-Match accepted: %q", invalid)
+		}
+	}
+	if !etagMatches(`W/"3", "4"`, 3) || !etagMatches(`W/"3", "4"`, 4) || etagMatches(`"5"`, 4) {
+		t.Fatal("ETag matching did not honor strong/weak candidate lists")
 	}
 }

@@ -181,7 +181,7 @@ func (s *Store) ListReleases(ctx context.Context, limit, offset int) ([]model.Ap
 func (s *Store) LatestRelease(ctx context.Context, platform, channel string) (model.AppRelease, error) {
 	platform = strings.ToUpper(strings.TrimSpace(platform))
 	channel = normalizeChannel(channel)
-	if !validPlatform(platform) {
+	if !validPlatform(platform) || !validChannel(channel) {
 		return model.AppRelease{}, ErrInvalid
 	}
 	var item model.AppRelease

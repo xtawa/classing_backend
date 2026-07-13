@@ -9,7 +9,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/classing-backend ./cmd/server
+	go build -trimpath -ldflags="-s -w" -o /out/classing-backend ./cmd/server \
+	&& CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+	go build -trimpath -ldflags="-s -w" -o /out/classing-storage-audit ./cmd/storage-audit
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata \
@@ -19,8 +21,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && chown -R classing:classing /data /app
 WORKDIR /app
 COPY --from=build /out/classing-backend /app/classing-backend
+COPY --from=build /out/classing-storage-audit /app/classing-storage-audit
 USER classing
 EXPOSE 8080
-VOLUME ["/data"]
 ENV APP_ENV=production HTTP_ADDR=:8080
 ENTRYPOINT ["/app/classing-backend"]

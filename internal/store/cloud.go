@@ -5,7 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+	"time"
 )
+
+var ErrIdempotencyKeyReused = errors.New("idempotency key reused with different payload")
 
 type CloudDocument struct {
 	UserID    string `db:"user_id"`
@@ -56,6 +62,81 @@ func (s *Store) PutCloudDocument(ctx context.Context, userID string, payload jso
 		return CloudDocument{}, ErrConflict
 	}
 	return s.CloudDocument(ctx, userID)
+}
+
+// PutCloudDocumentIdempotent commits the document write, idempotency response,
+// and security audit as one unit. A returned replay record means no write was
+// performed and the caller should return the stored response verbatim.
+func (s *Store) PutCloudDocumentIdempotent(ctx context.Context, userID string, payload json.RawMessage, expectedVersion int64, key, requestHash string, audit AuditContext) (CloudDocument, *IdempotencyRecord, error) {
+	if !json.Valid(payload) {
+		return CloudDocument{}, nil, ErrInvalid
+	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return CloudDocument{}, nil, err
+	}
+	defer tx.Rollback()
+
+	if key != "" {
+		var existing IdempotencyRecord
+		err = tx.GetContext(ctx, &existing, s.rebind(`SELECT * FROM idempotency_keys WHERE user_id = ? AND key_value = ? AND expires_at > ?`), userID, key, nowMillis())
+		if err == nil {
+			if existing.RequestHash != requestHash {
+				return CloudDocument{}, nil, ErrIdempotencyKeyReused
+			}
+			return CloudDocument{}, &existing, nil
+		}
+		if normalizeDBError(err) != ErrNotFound {
+			return CloudDocument{}, nil, err
+		}
+	}
+
+	var current CloudDocument
+	err = tx.GetContext(ctx, &current, s.rebind(`SELECT * FROM cloud_documents WHERE user_id = ?`), userID)
+	now := nowMillis()
+	var item CloudDocument
+	if normalizeDBError(err) == ErrNotFound {
+		if expectedVersion != 0 {
+			return CloudDocument{}, nil, ErrConflict
+		}
+		item = CloudDocument{UserID: userID, Payload: string(payload), Version: 1, UpdatedAt: now}
+		if _, err = tx.ExecContext(ctx, s.rebind(`INSERT INTO cloud_documents (user_id, payload, version, updated_at) VALUES (?, ?, 1, ?)`), userID, item.Payload, item.UpdatedAt); err != nil {
+			return CloudDocument{}, nil, normalizeDBError(err)
+		}
+	} else if err != nil {
+		return CloudDocument{}, nil, err
+	} else {
+		if current.Version != expectedVersion {
+			return CloudDocument{}, nil, ErrConflict
+		}
+		result, execErr := tx.ExecContext(ctx, s.rebind(`UPDATE cloud_documents SET payload = ?, version = version + 1, updated_at = ? WHERE user_id = ? AND version = ?`), string(payload), now, userID, current.Version)
+		if execErr != nil {
+			return CloudDocument{}, nil, execErr
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return CloudDocument{}, nil, ErrConflict
+		}
+		item = CloudDocument{UserID: userID, Payload: string(payload), Version: current.Version + 1, UpdatedAt: now}
+	}
+
+	body := `{"success":true,"version":` + strconv.FormatInt(item.Version, 10) + `}`
+	if key != "" {
+		record := IdempotencyRecord{KeyValue: key, UserID: userID, RequestHash: requestHash, ResponseCode: http.StatusOK, ResponseBody: body, ExpiresAt: time.Now().Add(24 * time.Hour).UnixMilli()}
+		if _, err = tx.ExecContext(ctx, s.rebind(`INSERT INTO idempotency_keys (key_value, user_id, request_hash, response_code, response_body, expires_at) VALUES (?, ?, ?, ?, ?, ?)`), record.KeyValue, record.UserID, record.RequestHash, record.ResponseCode, record.ResponseBody, record.ExpiresAt); err != nil {
+			return CloudDocument{}, nil, normalizeDBError(err)
+		}
+	}
+	audit.Metadata = map[string]any{"version": item.Version, "bytes": len(payload)}
+	if err = s.auditInTx(ctx, tx, audit); err != nil {
+		return CloudDocument{}, nil, err
+	}
+	if err = s.runtimeEventInTx(ctx, tx, userID, "client-settings", map[string]any{"version": item.Version, "updatedAt": item.UpdatedAt}); err != nil {
+		return CloudDocument{}, nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return CloudDocument{}, nil, err
+	}
+	return item, nil, nil
 }
 
 func HashRequest(payload []byte) string {

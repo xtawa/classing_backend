@@ -272,7 +272,12 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			writeError(w, r, http.StatusUnauthorized, "AUTH_SESSION_REVOKED", "session has been revoked")
 			return
 		}
-		ctx := context.WithValue(r.Context(), principalKey{}, Principal{User: user})
+		active, err := s.store.SessionActive(r.Context(), user.ID, claims.Session)
+		if err != nil || !active {
+			writeError(w, r, http.StatusUnauthorized, "AUTH_SESSION_REVOKED", "session has been revoked")
+			return
+		}
+		ctx := context.WithValue(r.Context(), principalKey{}, Principal{User: user, SessionID: claims.Session})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

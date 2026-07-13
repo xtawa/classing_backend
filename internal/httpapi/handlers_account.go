@@ -37,13 +37,14 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	currentUser := principal(r).User
 	emailChanging := body.Email != "" && !strings.EqualFold(body.Email, currentUser.Email)
+	profileChanging := body.Username != currentUser.Username || emailChanging
+	if profileChanging && !auth.VerifyPassword(currentUser.PasswordHash, body.CurrentPassword) {
+		writeError(w, r, http.StatusForbidden, "ACCOUNT_PASSWORD_CURRENT_INVALID", "current password is incorrect")
+		return
+	}
 	if emailChanging {
 		if _, err := mail.ParseAddress(body.Email); err != nil {
 			writeError(w, r, http.StatusBadRequest, "ACCOUNT_EMAIL_INVALID", "email address is invalid")
-			return
-		}
-		if !auth.VerifyPassword(currentUser.PasswordHash, body.CurrentPassword) {
-			writeError(w, r, http.StatusForbidden, "ACCOUNT_PASSWORD_CURRENT_INVALID", "current password is incorrect")
 			return
 		}
 		existing, err := s.store.UserByIdentifier(r.Context(), body.Email)

@@ -173,7 +173,6 @@ server {
         proxy_set_header X-Request-ID $request_id;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
-        proxy_send_timeout 60s;
     }
 }
 ```
@@ -535,3 +534,12 @@ GET /api/v1/membership/status
 - [ ] PostgreSQL 与 SQLite 备份已实际恢复演练。
 - [ ] `/health/ready` 已纳入监控。
 - [ ] Nginx 与服务端日志均保留 request ID。
+
+## 15. 可靠部署、联合备份与恢复校验
+
+- Nginx 配置以仓库内 `deploy/nginx/classing.conf` 为准：上传上限 260 MB，连接超时 30 秒，读写超时 300 秒；`X-Forwarded-For` 由可信本机代理覆盖，`/metrics` 仅允许本机访问。
+- 部署前执行 `deploy/backup.sh`，会在 `/opt/classing/backups/classing-<UTC时间>` 同时生成 `postgres.dump`、`releases.tar.gz`、`manifest.txt` 和 `SHA256SUMS`，四者均非空才可继续。
+- 使用临时 PostgreSQL 容器运行 `deploy/verify-restore.sh BACKUP_DIR ISOLATED_CONTAINER`。脚本拒绝常见生产容器名，不得对生产数据库执行恢复演练。
+- 自动部署使用 `/run/lock/classing-deploy.lock`。目标提交先在临时 worktree 构建为带提交哈希的镜像，构建成功后才备份、快进 Git 并切换容器。
+- 成功提交记录写入 `/opt/classing/.deployed-commit`。健康失败时切回上一镜像且不推进成功记录，因此下一次运行会再次尝试同一目标提交。
+- 手工上线同样必须检查工作树干净、旧 HEAD 是 `origin/main` 的祖先、备份非空、容器 healthy、内部与公网 `/health/ready`、`/metrics`、迁移状态及最近错误日志。

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -28,6 +29,29 @@ import (
 type testClient struct {
 	base   string
 	client *http.Client
+}
+
+func TestReadyReportsMailDegradedAndShutdown(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/health.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute}
+	api := New(cfg, data, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}, slog.Default())
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+	client := testClient{base: server.URL, client: server.Client()}
+	status, body := client.request(t, http.MethodGet, "/health/ready", "", nil)
+	if status != http.StatusOK || body["status"] != "ready" || body["checks"].(map[string]any)["mail"] != "degraded" {
+		t.Fatalf("unexpected degraded readiness: %d %+v", status, body)
+	}
+	api.MarkShuttingDown()
+	status, body = client.request(t, http.MethodGet, "/health/ready", "", nil)
+	if status != http.StatusServiceUnavailable || body["status"] != "not_ready" {
+		t.Fatalf("shutdown should be not ready: %d %+v", status, body)
+	}
 }
 
 func TestAnnouncementsAndReleaseUploadDownload(t *testing.T) {
@@ -255,7 +279,7 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 		},
 		"devices": []any{},
 	}
-	status, body = client.request(t, http.MethodPut, "/api/v1/cloud/official/document", access, settingsDoc)
+	status, body = client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, settingsDoc, map[string]string{"If-Match": `"0"`})
 	if status != http.StatusOK {
 		t.Fatalf("non-member official settings put: %d %+v", status, body)
 	}
@@ -275,7 +299,7 @@ func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 		t.Fatalf("non-member cloud document changes were not filtered: %+v", body)
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		status, body = client.request(t, http.MethodPut, "/api/v1/cloud/official/document", access, body)
+		status, body = client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, body, map[string]string{"If-Match": `"` + strconv.Itoa(attempt+1) + `"`})
 		if status != http.StatusOK {
 			t.Fatalf("repeated non-member settings put %d: %d %+v", attempt+1, status, body)
 		}
@@ -840,6 +864,32 @@ func registerTestUser(t *testing.T, client testClient, username, email, password
 		t.Fatalf("confirm %s: %d %+v", username, status, body)
 	}
 	return body["session"].(map[string]any)["accessToken"].(string)
+}
+
+func TestLogoutRevokesOnlyCurrentAccessSession(t *testing.T) {
+	_, _, client := newTestServerWithTrustedProxies(t, parseCIDRs(t, "127.0.0.0/8"))
+	login := func() (string, string) {
+		status, body := client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "admin", "password": "AdminPass123!"})
+		if status != http.StatusOK {
+			t.Fatalf("login: %d %+v", status, body)
+		}
+		session := body["session"].(map[string]any)
+		return session["accessToken"].(string), session["refreshToken"].(string)
+	}
+	firstAccess, _ := login()
+	secondAccess, secondRefresh := login()
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/logout", firstAccess, map[string]any{"refreshToken": secondRefresh})
+	if status != http.StatusOK {
+		t.Fatalf("logout: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", firstAccess, nil)
+	if status != http.StatusUnauthorized || body["code"] != "AUTH_SESSION_REVOKED" {
+		t.Fatalf("revoked access accepted: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodGet, "/api/v1/account/me", secondAccess, nil)
+	if status != http.StatusOK {
+		t.Fatalf("unrelated session revoked: %d %+v", status, body)
+	}
 }
 
 func TestSensitiveLimitMiddleware(t *testing.T) {

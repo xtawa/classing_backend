@@ -121,3 +121,25 @@ func (s *Store) SetSetting(ctx context.Context, actorID, key, value string) erro
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO system_settings (setting_key, setting_value, updated_by, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`), key, value, actorID, nowMillis())
 	return err
 }
+
+func (s *Store) SetSettingsAudited(ctx context.Context, actorID string, settings map[string]string, audit AuditContext) error {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range settings {
+		now := nowMillis()
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO system_settings (setting_key, setting_value, updated_by, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`), key, value, actorID, now); err != nil {
+			return err
+		}
+		if err := s.runtimeEventInTx(ctx, tx, "", "system-settings", map[string]any{"key": key, "updatedAt": now}); err != nil {
+			return err
+		}
+	}
+	audit.Metadata = map[string]any{"keys": len(settings)}
+	if err := s.auditInTx(ctx, tx, audit); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

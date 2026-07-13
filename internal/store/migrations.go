@@ -252,6 +252,25 @@ var migrations = []string{
 		created_at BIGINT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_email_change_user ON email_change_requests(user_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS auth_sessions (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		revoked_at BIGINT NOT NULL DEFAULT 0,
+		expires_at BIGINT NOT NULL,
+		created_at BIGINT NOT NULL,
+		last_seen_at BIGINT NOT NULL,
+		ip_address TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT ''
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, revoked_at, expires_at)`,
+	`CREATE TABLE IF NOT EXISTS runtime_events (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL DEFAULT '',
+		event_type TEXT NOT NULL,
+		payload TEXT NOT NULL DEFAULT '{}',
+		created_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_runtime_events_user_id ON runtime_events(user_id, id)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -285,8 +304,29 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureFailedAttemptsColumns(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureRefreshTokenSessionColumn(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureRefreshTokenSessionColumn(ctx context.Context, tx *sqlx.Tx) error {
+	present, err := s.tableExists(ctx, tx, "refresh_tokens")
+	if err != nil || !present {
+		return err
+	}
+	hasColumn, err := s.columnExists(ctx, tx, "refresh_tokens", "session_id")
+	if err != nil {
+		return fmt.Errorf("check refresh_tokens.session_id: %w", err)
+	}
+	if hasColumn {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE refresh_tokens ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add refresh_tokens.session_id: %w", err)
 	}
 	return nil
 }

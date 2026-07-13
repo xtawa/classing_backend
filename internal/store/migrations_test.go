@@ -12,11 +12,12 @@ func TestMigrateEmptyDB(t *testing.T) {
 			ctx := context.Background()
 
 			tables := []string{
-				"users", "refresh_tokens", "password_reset_tokens",
+				"users", "auth_sessions", "refresh_tokens", "password_reset_tokens",
 				"memberships", "membership_events", "redeem_codes", "redeem_redemptions",
 				"timetable_projects", "cloud_documents", "idempotency_keys",
 				"briefing_subscriptions", "mailboxes", "briefing_jobs",
 				"announcements", "app_releases", "audit_logs", "system_settings",
+				"runtime_events",
 				"email_verification_challenges", "email_change_requests",
 			}
 			for _, table := range tables {

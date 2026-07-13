@@ -20,7 +20,11 @@ type timetableRequest struct {
 func (s *Server) listTimetables(w http.ResponseWriter, r *http.Request) {
 	user := principal(r).User
 	limit, offset := pageParams(r)
-	items, total, err := s.store.ListTimetables(r.Context(), user.ID, user.Role == "ADMIN", limit, offset)
+	ownerID := ""
+	if user.Role == "ADMIN" {
+		ownerID = r.URL.Query().Get("ownerId")
+	}
+	items, total, err := s.store.ListTimetablesFiltered(r.Context(), user.ID, user.Role == "ADMIN", limit, offset, r.URL.Query().Get("q"), ownerID)
 	if err != nil {
 		writeStoreError(w, r, err, "TIMETABLE")
 		return

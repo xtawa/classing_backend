@@ -18,6 +18,7 @@ import (
 
 type Claims struct {
 	Subject string `json:"sub"`
+	Session string `json:"sid"`
 	Role    string `json:"role"`
 	Issued  int64  `json:"iat"`
 	Expires int64  `json:"exp"`
@@ -34,10 +35,11 @@ func NewManager(secret []byte, ttl time.Duration) *Manager {
 	return &Manager{secret: secret, ttl: ttl}
 }
 
-func (m *Manager) Issue(user model.User) (string, int64, error) {
+func (m *Manager) Issue(user model.User, sessionID string) (string, int64, error) {
 	now := time.Now()
 	claims := Claims{
 		Subject: user.ID,
+		Session: sessionID,
 		Role:    user.Role,
 		Issued:  now.Unix(),
 		Expires: now.Add(m.ttl).Unix(),
@@ -71,7 +73,7 @@ func (m *Manager) Parse(token string) (Claims, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return Claims{}, errors.New("invalid token claims")
 	}
-	if claims.Subject == "" || claims.Expires <= time.Now().Unix() {
+	if claims.Subject == "" || claims.Session == "" || claims.Expires <= time.Now().Unix() {
 		return Claims{}, errors.New("token expired")
 	}
 	if claims.Role != model.RoleAdmin && claims.Role != model.RoleUser {

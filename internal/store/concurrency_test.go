@@ -119,6 +119,61 @@ func TestPutCloudDocumentConcurrent(t *testing.T) {
 	}
 }
 
+func TestPutCloudDocumentIdempotentCommitsWriteResponseAndAudit(t *testing.T) {
+	for _, d := range testDialects(t) {
+		t.Run(d.name, func(t *testing.T) {
+			data := d.open(t)
+			ctx := context.Background()
+			user := createTestUser(t, data, 0)
+			payload := []byte(`{"format":"classing_cloud_sync_v2","updatedAt":0,"records":{},"changes":[],"devices":[]}`)
+			hash := HashRequest(payload)
+			audit := AuditContext{ActorID: user.ID, Action: "OFFICIAL_CLOUD_WRITE", TargetType: "CLOUD_DOCUMENT", TargetID: user.ID}
+
+			item, replay, err := data.PutCloudDocumentIdempotent(ctx, user.ID, payload, 0, "request-1", hash, audit)
+			if err != nil || replay != nil || item.Version != 1 {
+				t.Fatalf("first write = %+v replay=%+v err=%v", item, replay, err)
+			}
+			_, replay, err = data.PutCloudDocumentIdempotent(ctx, user.ID, payload, 0, "request-1", hash, audit)
+			if err != nil || replay == nil || replay.ResponseBody != `{"success":true,"version":1}` {
+				t.Fatalf("replay = %+v err=%v", replay, err)
+			}
+			changed := []byte(`{"format":"classing_cloud_sync_v2","updatedAt":1,"records":{},"changes":[],"devices":[]}`)
+			if _, _, err = data.PutCloudDocumentIdempotent(ctx, user.ID, changed, 1, "request-1", HashRequest(changed), audit); !errors.Is(err, ErrIdempotencyKeyReused) {
+				t.Fatalf("different payload error = %v, want ErrIdempotencyKeyReused", err)
+			}
+			var audits int
+			if err = data.db.GetContext(ctx, &audits, data.rebind(`SELECT COUNT(*) FROM audit_logs WHERE action = ? AND target_id = ?`), "OFFICIAL_CLOUD_WRITE", user.ID); err != nil {
+				t.Fatal(err)
+			}
+			if audits != 1 {
+				t.Fatalf("audit rows = %d, want 1", audits)
+			}
+		})
+	}
+}
+
+func TestRuntimeEventsResumeInOrderForUserAndGlobalSettings(t *testing.T) {
+	data := newSQLiteTestStore(t)
+	ctx := context.Background()
+	user := createTestUser(t, data, 0)
+	payload := []byte(`{"format":"classing_cloud_sync_v2","updatedAt":0,"records":{},"changes":[],"devices":[]}`)
+	audit := AuditContext{ActorID: user.ID, Action: "OFFICIAL_CLOUD_WRITE", TargetType: "CLOUD_DOCUMENT", TargetID: user.ID}
+	if _, _, err := data.PutCloudDocumentIdempotent(ctx, user.ID, payload, 0, "", HashRequest(payload), audit); err != nil {
+		t.Fatal(err)
+	}
+	if err := data.SetSettingsAudited(ctx, user.ID, map[string]string{"maintenance.message": "planned"}, AuditContext{ActorID: user.ID, Action: "SYSTEM_SETTINGS_UPDATE", TargetType: "SYSTEM_SETTINGS"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := data.RuntimeEvents(ctx, user.ID, "", 100)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("events = %+v err=%v", events, err)
+	}
+	resumed, err := data.RuntimeEvents(ctx, user.ID, events[0].ID, 100)
+	if err != nil || len(resumed) != 1 || resumed[0].ID != events[1].ID {
+		t.Fatalf("resumed events = %+v err=%v", resumed, err)
+	}
+}
+
 func TestRotateRefreshTokenConcurrent(t *testing.T) {
 	for _, d := range testDialects(t) {
 		t.Run(d.name, func(t *testing.T) {

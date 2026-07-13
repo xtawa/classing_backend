@@ -21,7 +21,10 @@ import (
 type principalKey struct{}
 type requestIDKey struct{}
 
-type Principal struct{ User model.User }
+type Principal struct {
+	User      model.User
+	SessionID string
+}
 
 func principal(r *http.Request) Principal {
 	value, _ := r.Context().Value(principalKey{}).(Principal)

@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtawa/classing-backend/internal/auth"
@@ -26,6 +28,8 @@ type Server struct {
 	cloudWriteAccountLimiter   *rateLimiter
 	accountWriteAccountLimiter *rateLimiter
 	refreshReplays             *refreshReplayCache
+	shuttingDown               atomic.Bool
+	startedAt                  time.Time
 }
 
 func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *Server {
@@ -44,6 +48,7 @@ func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *
 		cloudWriteAccountLimiter:   newRateLimiter(cloudWriteAccountLimit, time.Minute),
 		accountWriteAccountLimiter: newRateLimiter(accountWriteAccountLimit, time.Minute),
 		refreshReplays:             newRefreshReplayCache(5 * time.Second),
+		startedAt:                  time.Now(),
 	}
 }
 
@@ -52,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.Handle("GET /api/v1/client/announcements", s.publicClientRateLimit(http.HandlerFunc(s.publicAnnouncements)))
 	mux.Handle("GET /api/v1/client/releases/latest", s.publicClientRateLimit(http.HandlerFunc(s.publicLatestRelease)))
 	mux.Handle("GET /api/v1/client/releases/{id}/download", s.publicClientRateLimit(http.HandlerFunc(s.publicDownloadRelease)))
@@ -122,14 +128,52 @@ func (s *Server) Handler() http.Handler {
 	return s.middleware(mux)
 }
 
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	remote := remoteAddrIP(r.RemoteAddr)
+	if remote != "127.0.0.1" && remote != "::1" {
+		writeError(w, r, http.StatusForbidden, "METRICS_LOCAL_ONLY", "metrics are available only from localhost")
+		return
+	}
+	databaseUp := 1
+	if err := s.store.Ping(r.Context()); err != nil {
+		databaseUp = 0
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = fmt.Fprintf(w, "# HELP classing_up Process availability.\n# TYPE classing_up gauge\nclassing_up 1\n# HELP classing_database_up Database availability.\n# TYPE classing_database_up gauge\nclassing_database_up %d\n# HELP classing_process_uptime_seconds Process uptime.\n# TYPE classing_process_uptime_seconds gauge\nclassing_process_uptime_seconds %.0f\n", databaseUp, time.Since(s.startedAt).Seconds())
+}
+
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "classing-backend"})
 }
 
+func (s *Server) MarkShuttingDown() { s.shuttingDown.Store(true) }
+
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.Ping(r.Context()); err != nil {
-		writeError(w, r, http.StatusServiceUnavailable, "SERVICE_NOT_READY", "database is unavailable")
+	checks := map[string]any{}
+	if s.shuttingDown.Load() {
+		checks["shutdown"] = "stopping"
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "checks": checks})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+	checks["shutdown"] = "ok"
+	if err := s.store.Ping(r.Context()); err != nil {
+		checks["database"] = "unavailable"
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "checks": checks, "code": "SERVICE_NOT_READY"})
+		return
+	}
+	checks["database"] = "ok"
+	migrations, err := s.store.MigrationStatus(r.Context())
+	if err != nil || migrations.Pending != 0 {
+		checks["migrations"] = map[string]any{"status": "pending", "pending": migrations.Pending}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "checks": checks, "code": "SERVICE_MIGRATIONS_PENDING"})
+		return
+	}
+	checks["migrations"] = "ok"
+	mailReady, err := s.store.MailReady(r.Context())
+	if err != nil || !mailReady {
+		checks["mail"] = "degraded"
+	} else {
+		checks["mail"] = "ok"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "checks": checks})
 }

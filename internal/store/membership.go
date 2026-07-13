@@ -103,6 +103,14 @@ func (s *Store) RevokeRedeemCode(ctx context.Context, code string) error {
 }
 
 func (s *Store) Redeem(ctx context.Context, userID, code string) (model.Membership, error) {
+	return s.redeem(ctx, userID, code, nil)
+}
+
+func (s *Store) RedeemAudited(ctx context.Context, userID, code string, audit AuditContext) (model.Membership, error) {
+	return s.redeem(ctx, userID, code, &audit)
+}
+
+func (s *Store) redeem(ctx context.Context, userID, code string, audit *AuditContext) (model.Membership, error) {
 	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{})
 	if err != nil {
 		return model.Membership{}, err
@@ -151,6 +159,12 @@ func (s *Store) Redeem(ctx context.Context, userID, code string) (model.Membersh
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO membership_events (id, user_id, action, tier, old_expires_at, new_expires_at, source, actor_id, created_at) VALUES (?, ?, 'GRANT', 'REDEEMED', ?, ?, 'REDEEM_CODE', ?, ?)`), ids.New("mev"), userID, old.ExpiresAt, newExpires, userID, now); err != nil {
 		return model.Membership{}, err
 	}
+	if audit != nil {
+		audit.Metadata = map[string]any{"codePrefix": prefixError(item.Code, 7), "newExpiresAt": newExpires}
+		if err := s.auditInTx(ctx, tx, *audit); err != nil {
+			return model.Membership{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.Membership{}, err
 	}
@@ -158,9 +172,22 @@ func (s *Store) Redeem(ctx context.Context, userID, code string) (model.Membersh
 }
 
 func (s *Store) SetMembership(ctx context.Context, actorID, userID, tier string, expiresAt int64, action string) (model.Membership, error) {
+	return s.setMembership(ctx, actorID, userID, tier, expiresAt, action, nil)
+}
+
+func (s *Store) SetMembershipAudited(ctx context.Context, actorID, userID, tier string, expiresAt int64, action string, audit AuditContext) (model.Membership, error) {
+	return s.setMembership(ctx, actorID, userID, tier, expiresAt, action, &audit)
+}
+
+func (s *Store) setMembership(ctx context.Context, actorID, userID, tier string, expiresAt int64, action string, audit *AuditContext) (model.Membership, error) {
 	tier = strings.ToUpper(strings.TrimSpace(tier))
 	if tier == "" {
-		tier = "FREE"
+		tier = "MONTHLY"
+	}
+	validTiers := map[string]bool{"FREE": true, "MONTHLY": true, "ANNUAL": true, "PREMIUM": true, "REDEEMED": true}
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if !validTiers[tier] || !map[string]bool{"GRANT": true, "EXTEND": true, "SHORTEN": true, "REVOKE": true}[action] || expiresAt < 0 {
+		return model.Membership{}, ErrInvalid
 	}
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -177,6 +204,12 @@ func (s *Store) SetMembership(ctx context.Context, actorID, userID, tier string,
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO membership_events (id, user_id, action, tier, old_expires_at, new_expires_at, source, actor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'ADMIN', ?, ?)`), ids.New("mev"), userID, action, tier, old.ExpiresAt, expiresAt, actorID, now); err != nil {
 		return model.Membership{}, err
+	}
+	if audit != nil {
+		audit.Metadata = map[string]any{"action": action, "tier": tier, "oldExpiresAt": old.ExpiresAt, "newExpiresAt": expiresAt}
+		if err := s.auditInTx(ctx, tx, *audit); err != nil {
+			return model.Membership{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Membership{}, err

@@ -49,9 +49,9 @@ func TestSecurityHeaders(t *testing.T) {
 		t.Fatalf("status: expected 200, got %d", resp.StatusCode)
 	}
 	checks := map[string]string{
-		"X-Content-Type-Options": "nosniff",
-		"Referrer-Policy":        "same-origin",
-		"Permissions-Policy":     "camera=(), microphone=(), geolocation=()",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "same-origin",
+		"Permissions-Policy":      "camera=(), microphone=(), geolocation=()",
 		"Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
 	}
 	for header, want := range checks {
@@ -206,12 +206,12 @@ func TestIdempotencyKeyLengthLimit(t *testing.T) {
 	access := registerTestUser(t, client, "alice", "alice@idem.test", "AlicePass123!")
 	doc := map[string]any{"format": "classing_cloud_sync_v2", "updatedAt": 0, "records": map[string]any{}, "changes": []any{}, "devices": []any{}}
 	oversizedKey := strings.Repeat("k", maxHeaderIDLen+1)
-	status, body := client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, map[string]string{"Idempotency-Key": oversizedKey})
+	status, body := client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, map[string]string{"Idempotency-Key": oversizedKey, "If-Match": `"0"`})
 	if status != http.StatusBadRequest || body["code"] != "IDEMPOTENCY_KEY_TOO_LONG" {
 		t.Fatalf("oversized idempotency key: expected 400 IDEMPOTENCY_KEY_TOO_LONG, got %d %+v", status, body)
 	}
 	validKey := strings.Repeat("k", maxHeaderIDLen)
-	status, body = client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, map[string]string{"Idempotency-Key": validKey})
+	status, body = client.requestWithHeaders(t, http.MethodPut, "/api/v1/cloud/official/document", access, doc, map[string]string{"Idempotency-Key": validKey, "If-Match": `"0"`})
 	if status == http.StatusBadRequest && body["code"] == "IDEMPOTENCY_KEY_TOO_LONG" {
 		t.Fatalf("valid-length (128) idempotency key was rejected as too long")
 	}

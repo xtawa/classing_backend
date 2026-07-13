@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/xtawa/classing-backend/internal/auth"
@@ -18,6 +19,7 @@ type SessionToken struct {
 	ExpiresAt  int64  `db:"expires_at"`
 	RevokedAt  int64  `db:"revoked_at"`
 	ReplacedBy string `db:"replaced_by"`
+	SessionID  string `db:"session_id"`
 }
 
 // maxVerificationAttempts caps how many times a verification code or email
@@ -94,6 +96,33 @@ func (s *Store) CreateEmailVerificationChallenge(ctx context.Context, userID, co
 		return "", normalizeDBError(err)
 	}
 	return id, tx.Commit()
+}
+
+func (s *Store) CancelEmailVerificationChallenge(ctx context.Context, challengeID string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(`UPDATE email_verification_challenges SET used_at = ? WHERE id = ? AND used_at = 0`), nowMillis(), challengeID)
+	return err
+}
+
+func (s *Store) CleanupExpiredSecurityData(ctx context.Context) error {
+	now := nowMillis()
+	cutoff := now - int64((24 * time.Hour).Milliseconds())
+	queries := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM email_verification_challenges WHERE expires_at < ? OR (used_at > 0 AND used_at < ?)`, []any{now, cutoff}},
+		{`DELETE FROM email_change_requests WHERE expires_at < ? OR (used_at > 0 AND used_at < ?)`, []any{now, cutoff}},
+		{`DELETE FROM password_reset_tokens WHERE expires_at < ? OR (used_at > 0 AND used_at < ?)`, []any{now, cutoff}},
+		{`DELETE FROM idempotency_keys WHERE expires_at < ?`, []any{now}},
+		{`DELETE FROM auth_sessions WHERE (expires_at < ? OR revoked_at > 0) AND created_at < ?`, []any{now, cutoff}},
+		{`DELETE FROM runtime_events WHERE created_at < ?`, []any{now - int64((7 * 24 * time.Hour).Milliseconds())}},
+	}
+	for _, item := range queries {
+		if _, err := s.db.ExecContext(ctx, s.rebind(item.query), item.args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ConsumeEmailVerificationChallenge(ctx context.Context, challengeID, codeHash string) (model.User, error) {
@@ -264,6 +293,9 @@ func (s *Store) ConsumeEmailChangeRequest(ctx context.Context, requestID, codeHa
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, row.UserID); err != nil {
 		return model.User{}, err
 	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, row.UserID); err != nil {
+		return model.User{}, err
+	}
 	var user model.User
 	if err := tx.GetContext(ctx, &user, s.rebind(`SELECT * FROM users WHERE id = ?`), row.UserID); err != nil {
 		return model.User{}, normalizeDBError(err)
@@ -300,59 +332,144 @@ func (s *Store) UpdatePassword(ctx context.Context, id, hash string) error {
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, id); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt int64, ip, ua string) (string, error) {
-	id := ids.New("rft")
-	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at, ip_address, user_agent)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`), id, userID, tokenHash, expiresAt, nowMillis(), ip, ua)
-	return id, normalizeDBError(err)
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	now := nowMillis()
+	sessionID := ids.New("ses")
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO auth_sessions (id, user_id, expires_at, created_at, last_seen_at, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)`), sessionID, userID, expiresAt, now, now, ip, ua); err != nil {
+		return "", normalizeDBError(err)
+	}
+	refreshID := ids.New("rft")
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at, ip_address, user_agent, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`), refreshID, userID, tokenHash, expiresAt, now, ip, ua, sessionID); err != nil {
+		return "", normalizeDBError(err)
+	}
+	return sessionID, tx.Commit()
 }
 
 func (s *Store) RotateRefreshToken(ctx context.Context, oldHash, newHash string, newExpiresAt int64, ip, ua string) (model.User, error) {
+	user, _, err := s.RotateRefreshTokenSession(ctx, oldHash, newHash, newExpiresAt, ip, ua)
+	return user, err
+}
+
+func (s *Store) RotateRefreshTokenSession(ctx context.Context, oldHash, newHash string, newExpiresAt int64, ip, ua string) (model.User, string, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return model.User{}, err
+		return model.User{}, "", err
 	}
 	defer tx.Rollback()
 	var token SessionToken
-	if err := tx.GetContext(ctx, &token, s.rebind(`SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by FROM refresh_tokens WHERE token_hash = ?`), oldHash); err != nil {
-		return model.User{}, normalizeDBError(err)
+	if err := tx.GetContext(ctx, &token, s.rebind(`SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by, session_id FROM refresh_tokens WHERE token_hash = ?`), oldHash); err != nil {
+		return model.User{}, "", normalizeDBError(err)
 	}
 	now := nowMillis()
 	if token.RevokedAt != 0 || token.ExpiresAt <= now {
-		return model.User{}, ErrForbidden
+		if token.SessionID != "" {
+			_, _ = tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at = 0`), now, token.SessionID)
+			_ = tx.Commit()
+		}
+		return model.User{}, "", ErrForbidden
+	}
+	if token.SessionID == "" {
+		return model.User{}, "", ErrForbidden
+	}
+	var active int
+	if err := tx.GetContext(ctx, &active, s.rebind(`SELECT COUNT(*) FROM auth_sessions WHERE id = ? AND user_id = ? AND revoked_at = 0 AND expires_at > ?`), token.SessionID, token.UserID, now); err != nil || active != 1 {
+		return model.User{}, "", ErrForbidden
 	}
 	newID := ids.New("rft")
 	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ?, replaced_by = ? WHERE id = ? AND revoked_at = 0`), now, newID, token.ID)
 	if err != nil {
-		return model.User{}, err
+		return model.User{}, "", err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return model.User{}, ErrForbidden
+		return model.User{}, "", ErrForbidden
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at, ip_address, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)`), newID, token.UserID, newHash, newExpiresAt, now, ip, ua); err != nil {
-		return model.User{}, err
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, created_at, ip_address, user_agent, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`), newID, token.UserID, newHash, newExpiresAt, now, ip, ua, token.SessionID); err != nil {
+		return model.User{}, "", err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET expires_at = ?, last_seen_at = ?, ip_address = ?, user_agent = ? WHERE id = ?`), newExpiresAt, now, ip, ua, token.SessionID); err != nil {
+		return model.User{}, "", err
 	}
 	var user model.User
 	if err := tx.GetContext(ctx, &user, s.rebind(`SELECT * FROM users WHERE id = ?`), token.UserID); err != nil {
-		return model.User{}, normalizeDBError(err)
+		return model.User{}, "", normalizeDBError(err)
 	}
 	if user.Status != model.StatusActive {
-		return model.User{}, ErrForbidden
+		return model.User{}, "", ErrForbidden
 	}
-	return user, tx.Commit()
+	return user, token.SessionID, tx.Commit()
 }
 
 func (s *Store) RevokeRefreshToken(ctx context.Context, userID, tokenHash string) error {
-	_, err := s.db.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND token_hash = ? AND revoked_at = 0`), nowMillis(), userID, tokenHash)
-	return err
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.GetContext(ctx, &sessionID, s.rebind(`SELECT session_id FROM refresh_tokens WHERE user_id = ? AND token_hash = ?`), userID, tokenHash); err != nil {
+		return normalizeDBError(err)
+	}
+	now := nowMillis()
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at = 0`), now, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at = 0`), now, sessionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RevokeSession(ctx context.Context, userID, sessionID string) error {
+	if userID == "" || sessionID == "" {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := nowMillis()
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at = 0`), now, sessionID, userID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE session_id = ? AND user_id = ? AND revoked_at = 0`), now, sessionID, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SessionActive(ctx context.Context, userID, sessionID string) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	var count int
+	err := s.db.GetContext(ctx, &count, s.rebind(`SELECT COUNT(*) FROM auth_sessions WHERE id = ? AND user_id = ? AND revoked_at = 0 AND expires_at > ?`), sessionID, userID, nowMillis())
+	return count == 1, err
 }
 
 func (s *Store) CreateResetToken(ctx context.Context, userID, hash string, expiresAt int64, ip, ua string) error {
 	_, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, request_ip, request_ua, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`), ids.New("rst"), userID, hash, expiresAt, ip, ua, nowMillis())
 	return normalizeDBError(err)
+}
+
+func (s *Store) CancelResetToken(ctx context.Context, userID, hash string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM password_reset_tokens WHERE user_id = ? AND token_hash = ? AND used_at = 0`), userID, hash)
+	return err
 }
 
 func (s *Store) ConsumeResetToken(ctx context.Context, tokenHash, newPasswordHash string) (string, error) {
@@ -388,6 +505,9 @@ func (s *Store) ConsumeResetToken(ctx context.Context, tokenHash, newPasswordHas
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, row.UserID); err != nil {
 		return "", err
 	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, row.UserID); err != nil {
+		return "", err
+	}
 	return row.UserID, tx.Commit()
 }
 
@@ -411,25 +531,74 @@ func (s *Store) ListUsers(ctx context.Context, limit, offset int, query string) 
 	return users, total, nil
 }
 
-func (s *Store) AdminUpdateUser(ctx context.Context, id, role, status string) (model.User, error) {
+func (s *Store) AdminUpdateUser(ctx context.Context, actorID, id, role, status string, audit AuditContext) (model.User, error) {
 	if role != model.RoleAdmin && role != model.RoleUser {
 		return model.User{}, ErrInvalid
 	}
 	if status != model.StatusActive && status != model.StatusDisabled {
 		return model.User{}, ErrInvalid
 	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return model.User{}, err
+	}
+	defer tx.Rollback()
+	lockSuffix := ""
+	if s.dialect == "pgx" {
+		lockSuffix = " FOR UPDATE"
+	}
+	var current model.User
+	if err := tx.GetContext(ctx, &current, s.rebind(`SELECT * FROM users WHERE id = ?`)+lockSuffix, id); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	removingAdmin := current.Role == model.RoleAdmin && current.Status == model.StatusActive && (role != model.RoleAdmin || status != model.StatusActive)
+	if id == actorID && removingAdmin {
+		return model.User{}, ErrForbidden
+	}
+	if removingAdmin {
+		remaining := 0
+		if s.dialect == "pgx" {
+			var activeAdminIDs []string
+			if err := tx.SelectContext(ctx, &activeAdminIDs, s.rebind(`SELECT id FROM users WHERE role = ? AND status = ? ORDER BY id FOR UPDATE`), model.RoleAdmin, model.StatusActive); err != nil {
+				return model.User{}, err
+			}
+			for _, adminID := range activeAdminIDs {
+				if adminID != id {
+					remaining++
+				}
+			}
+		} else if err := tx.GetContext(ctx, &remaining, s.rebind(`SELECT COUNT(*) FROM users WHERE role = ? AND status = ? AND id <> ?`), model.RoleAdmin, model.StatusActive, id); err != nil {
+			return model.User{}, err
+		}
+		if remaining == 0 {
+			return model.User{}, ErrConflict
+		}
+	}
 	now := nowMillis()
-	result, err := s.db.ExecContext(ctx, s.rebind(`UPDATE users SET role = ?, status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?`), role, status, now, now, id)
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET role = ?, status = ?, auth_epoch = ?, updated_at = ? WHERE id = ?`), role, status, now, now, id)
 	if err != nil {
 		return model.User{}, normalizeDBError(err)
 	}
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return model.User{}, ErrNotFound
 	}
-	if status == model.StatusDisabled {
-		_, _ = s.db.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), nowMillis(), id)
+	if role != current.Role || status != current.Status {
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, id); err != nil {
+			return model.User{}, err
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, id); err != nil {
+			return model.User{}, err
+		}
 	}
-	return s.UserByID(ctx, id)
+	audit.TargetID = id
+	if err := s.auditInTx(ctx, tx, audit); err != nil {
+		return model.User{}, err
+	}
+	var updated model.User
+	if err := tx.GetContext(ctx, &updated, s.rebind(`SELECT * FROM users WHERE id = ?`), id); err != nil {
+		return model.User{}, normalizeDBError(err)
+	}
+	return updated, tx.Commit()
 }
 
 func txGet[T any](ctx context.Context, tx *sqlx.Tx, query string, args ...any) (T, error) {
@@ -437,4 +606,3 @@ func txGet[T any](ctx context.Context, tx *sqlx.Tx, query string, args ...any) (
 	err := tx.GetContext(ctx, &value, query, args...)
 	return value, err
 }
-

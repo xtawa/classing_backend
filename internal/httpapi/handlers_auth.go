@@ -40,7 +40,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) registrationConfig(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"turnstileRequired":         s.cfg.TurnstileSecret != "",
+		"turnstileRequired":         s.cfg.TurnstileRequired,
 		"turnstileSiteKey":          s.cfg.TurnstileSiteKey,
 		"emailVerificationRequired": true,
 	})
@@ -104,6 +104,7 @@ func (s *Server) requestRegistrationEmail(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if _, err := s.store.QueueEmailVerificationJob(r.Context(), user.ID, code, expiresAt); err != nil {
+		_ = s.store.CancelEmailVerificationChallenge(r.Context(), challengeID)
 		s.log.Error("queue registration verification email", "user_id", user.ID, "error", err, "request_id", requestID(r))
 		writeError(w, r, http.StatusServiceUnavailable, "AUTH_EMAIL_DELIVERY_FAILED", "verification email could not be queued")
 		return
@@ -143,10 +144,10 @@ func numericVerificationCode() (string, error) {
 
 func (s *Server) verifyTurnstile(r *http.Request, token string) (bool, error) {
 	if s.cfg.TurnstileSecret == "" {
-		return true, nil
+		return !s.cfg.TurnstileRequired, nil
 	}
 	if strings.TrimSpace(token) == "" {
-		return false, nil
+		return !s.cfg.TurnstileRequired, nil
 	}
 	form := url.Values{
 		"secret":   {s.cfg.TurnstileSecret},
@@ -180,13 +181,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, err := s.store.UserByIdentifier(r.Context(), identifier)
-	if err != nil || !auth.VerifyPassword(user.PasswordHash, body.Password) {
+	if err != nil || !auth.VerifyPassword(user.PasswordHash, body.Password) || user.Status != model.StatusActive {
 		s.loginFailLimiter.recordFailure(identifier)
+		if err == nil && user.Status != model.StatusActive {
+			s.audit(r, user.ID, "AUTH_LOGIN_REJECTED", "USER", user.ID, map[string]any{"reason": "ACCOUNT_UNAVAILABLE"})
+		}
 		writeError(w, r, http.StatusUnauthorized, "AUTH_INVALID_CREDENTIALS", "identifier or password is incorrect")
-		return
-	}
-	if user.Status != model.StatusActive {
-		writeError(w, r, http.StatusForbidden, "AUTH_ACCOUNT_DISABLED", "account is disabled")
 		return
 	}
 	s.loginFailLimiter.reset(identifier)
@@ -195,14 +195,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) writeSession(w http.ResponseWriter, r *http.Request, user model.User, status int) {
-	accessToken, accessExpiresAt, err := s.tokens.Issue(user)
+	refreshToken := ids.Token(32)
+	refreshExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
+	sessionID, err := s.store.CreateRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(refreshToken), refreshExpiresAt, s.clientIP(r), r.UserAgent())
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "AUTH_SESSION_FAILED", "could not create session")
 		return
 	}
-	refreshToken := ids.Token(32)
-	refreshExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
-	if _, err := s.store.CreateRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(refreshToken), refreshExpiresAt, s.clientIP(r), r.UserAgent()); err != nil {
+	accessToken, accessExpiresAt, err := s.tokens.Issue(user, sessionID)
+	if err != nil {
+		_ = s.store.RevokeRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(refreshToken))
 		writeError(w, r, http.StatusInternalServerError, "AUTH_SESSION_FAILED", "could not create session")
 		return
 	}
@@ -225,11 +227,11 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	session, err := s.refreshReplays.do(r.Context(), cacheKey, func() (refreshSession, error) {
 		newRefresh := ids.Token(32)
 		newExpiresAt := time.Now().Add(s.cfg.RefreshTokenTTL).UnixMilli()
-		user, err := s.store.RotateRefreshToken(r.Context(), auth.HashOpaqueToken(refreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, s.clientIP(r), r.UserAgent())
+		user, sessionID, err := s.store.RotateRefreshTokenSession(r.Context(), auth.HashOpaqueToken(refreshToken), auth.HashOpaqueToken(newRefresh), newExpiresAt, s.clientIP(r), r.UserAgent())
 		if err != nil {
 			return refreshSession{}, err
 		}
-		accessToken, accessExpiresAt, err := s.tokens.Issue(user)
+		accessToken, accessExpiresAt, err := s.tokens.Issue(user, sessionID)
 		if err != nil {
 			return refreshSession{}, fmt.Errorf("%w: %v", errRefreshSessionIssue, err)
 		}
@@ -260,9 +262,9 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := principal(r).User
-	_ = s.store.RevokeRefreshToken(r.Context(), user.ID, auth.HashOpaqueToken(body.RefreshToken))
+	_ = s.store.RevokeSession(r.Context(), user.ID, principal(r).SessionID)
 	s.refreshReplays.invalidateUser(user.ID)
-	s.audit(r, user.ID, "AUTH_LOGOUT", "SESSION", "", nil)
+	s.audit(r, user.ID, "AUTH_LOGOUT", "SESSION", principal(r).SessionID, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -277,14 +279,17 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.UserByIdentifier(r.Context(), strings.ToLower(strings.TrimSpace(body.Email)))
 	if err == nil && strings.EqualFold(user.Email, body.Email) {
 		token := ids.Token(32)
+		tokenHash := auth.HashOpaqueToken(token)
 		expiresAt := time.Now().Add(s.cfg.ResetTokenTTL).UnixMilli()
-		if err := s.store.CreateResetToken(r.Context(), user.ID, auth.HashOpaqueToken(token), expiresAt, s.clientIP(r), r.UserAgent()); err == nil {
-			s.audit(r, user.ID, "AUTH_PASSWORD_RESET_REQUEST", "USER", user.ID, nil)
+		if err := s.store.CreateResetToken(r.Context(), user.ID, tokenHash, expiresAt, s.clientIP(r), r.UserAgent()); err == nil {
 			if _, queueErr := s.store.QueuePasswordResetJob(r.Context(), user.ID, token, expiresAt); queueErr != nil {
+				_ = s.store.CancelResetToken(r.Context(), user.ID, tokenHash)
 				s.log.Error("queue password reset email", "user_id", user.ID, "error", queueErr, "request_id", requestID(r))
-			}
-			if s.cfg.ExposeResetToken && s.cfg.Environment != "production" {
-				response["devResetToken"] = token
+			} else {
+				s.audit(r, user.ID, "AUTH_PASSWORD_RESET_REQUEST", "USER", user.ID, nil)
+				if s.cfg.ExposeResetToken && s.cfg.Environment != "production" {
+					response["devResetToken"] = token
+				}
 			}
 		}
 	}

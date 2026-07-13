@@ -21,12 +21,13 @@ func (s *Server) redeemMembership(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	item, err := s.store.Redeem(r.Context(), principal(r).User.ID, strings.TrimSpace(body.Code))
+	userID := principal(r).User.ID
+	audit := s.auditContext(r, userID, "MEMBERSHIP_REDEEM", "MEMBERSHIP", userID, nil)
+	item, err := s.store.RedeemAudited(r.Context(), userID, strings.TrimSpace(body.Code), audit)
 	if err != nil {
 		writeStoreError(w, r, err, "MEMBERSHIP_REDEEM")
 		return
 	}
-	s.audit(r, principal(r).User.ID, "MEMBERSHIP_REDEEM", "MEMBERSHIP", principal(r).User.ID, map[string]any{"codePrefix": prefix(body.Code, 7)})
 	writeJSON(w, http.StatusOK, map[string]any{"membership": membershipPayload(item)})
 }
 

@@ -31,12 +31,18 @@ func (w *Worker) Run(ctx context.Context) {
 	defer scheduleTicker.Stop()
 	defer deliveryTicker.Stop()
 	w.schedule(ctx)
+	if err := w.store.CleanupExpiredSecurityData(ctx); err != nil {
+		w.log.Warn("cleanup expired security data", "error", err)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-scheduleTicker.C:
 			w.schedule(ctx)
+			if err := w.store.CleanupExpiredSecurityData(ctx); err != nil {
+				w.log.Warn("cleanup expired security data", "error", err)
+			}
 		case <-deliveryTicker.C:
 			w.deliverOne(ctx)
 		}
@@ -63,18 +69,18 @@ func (w *Worker) schedule(ctx context.Context) {
 		}
 		hour, _ := strconv.Atoi(parts[0])
 		minute, _ := strconv.Atoi(parts[1])
-		if local.Hour() != hour || local.Minute() != minute {
+		deliveryMinute := hour*60 + minute
+		if local.Hour()*60+local.Minute() < deliveryMinute {
 			continue
 		}
 		if item.LastScheduledAt > 0 && time.UnixMilli(item.LastScheduledAt).In(location).Format("2006-01-02") == local.Format("2006-01-02") {
 			continue
 		}
-		_, err = w.store.QueueBriefingJob(ctx, item.UserID, local.Format("2006-01-02"), "EMAIL", now.UnixMilli())
+		_, err = w.store.ScheduleBriefingJob(ctx, item.UserID, local.Format("2006-01-02"), "EMAIL", now.UnixMilli())
 		if err != nil && err != store.ErrConflict {
 			w.log.Error("queue briefing", "user_id", item.UserID, "error", err)
 			continue
 		}
-		_ = w.store.MarkBriefingScheduled(ctx, item.UserID, now.UnixMilli())
 	}
 }
 
@@ -87,18 +93,48 @@ func (w *Worker) deliverOne(ctx context.Context) {
 		w.log.Error("claim briefing job", "error", err)
 		return
 	}
-	mailbox, err := w.store.AcquireMailbox(ctx, time.Now().Format("2006-01-02"))
-	if err != nil {
-		_ = w.store.FailBriefingJob(ctx, job.ID, "mailbox pool exhausted", job.RetryCount)
-		return
+	usageDate := time.Now().Format("2006-01-02")
+	excluded := map[string]bool{}
+	var deliveredMailbox model.Mailbox
+	for {
+		mailbox, acquireErr := w.store.AcquireMailboxExcluding(ctx, usageDate, excluded)
+		if acquireErr != nil {
+			_ = w.store.FailBriefingJob(ctx, job.ID, "mailbox pool exhausted", job.RetryCount)
+			return
+		}
+		deliveryErr := send(mailbox, job)
+		if deliveryErr == nil {
+			deliveredMailbox = mailbox
+			break
+		}
+		classified := classifyMailError(deliveryErr)
+		w.log.Warn("send briefing", "job_id", job.ID, "mailbox_id", mailbox.ID, "error_class", classified)
+		_ = w.store.ReleaseMailboxReservation(ctx, mailbox.ID, usageDate)
+		excluded[mailbox.ID] = true
+		if classified != "smtp connection failed" && classified != "smtp authentication failed" {
+			_ = w.store.FailBriefingJob(ctx, job.ID, classified, job.RetryCount)
+			return
+		}
 	}
-	if err := send(mailbox, job); err != nil {
-		w.log.Warn("send briefing", "job_id", job.ID, "mailbox_id", mailbox.ID, "error", err)
-		_ = w.store.FailBriefingJob(ctx, job.ID, err.Error(), job.RetryCount)
-		return
-	}
-	if err := w.store.CompleteBriefingJob(ctx, job.ID, mailbox.ID); err != nil {
+	if err := w.store.CompleteBriefingJob(ctx, job.ID, deliveredMailbox.ID); err != nil {
 		w.log.Error("complete briefing job", "job_id", job.ID, "error", err)
+	}
+}
+
+func classifyMailError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "auth") || strings.Contains(message, "password") || strings.Contains(message, "secret"):
+		return "smtp authentication failed"
+	case strings.Contains(message, "timeout") || strings.Contains(message, "connection") || strings.Contains(message, "dial"):
+		return "smtp connection failed"
+	case strings.Contains(message, "recipient") || strings.Contains(message, "rcpt"):
+		return "smtp recipient rejected"
+	default:
+		return "smtp delivery failed"
 	}
 }
 
