@@ -8,6 +8,11 @@ const state = {
   registrationConfig: null,
   turnstileWidgetId: null,
   settingsStreamAbort: null,
+  settingsStreamRetry: null,
+  cloudEventVersion: 0,
+  settingsFormDirty: false,
+  settingsDirtyFields: new Set(),
+  settingsRendering: false,
 };
 
 const authShell = document.getElementById("authShell");
@@ -39,6 +44,31 @@ function saveSession(session) {
   if (session) sessionStorage.setItem("classing.session", JSON.stringify(session));
   else sessionStorage.removeItem("classing.session");
 }
+
+function cloudCursorKey() { return `classing.cloud.cursor.${state.account?.userId || "anonymous"}`; }
+
+function loadCloudCursor() {
+  const value = Number(localStorage.getItem(cloudCursorKey()) || 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function saveCloudCursor(version) {
+  if (!Number.isSafeInteger(version) || version < state.cloudEventVersion) return;
+  state.cloudEventVersion = version;
+  localStorage.setItem(cloudCursorKey(), String(version));
+}
+
+function browserDeviceId() {
+  const key = "classing.cloud.deviceId";
+  let value = localStorage.getItem(key);
+  if (!value) {
+    value = `web-${crypto.randomUUID()}`;
+    localStorage.setItem(key, value);
+  }
+  return value;
+}
+
+function sleep(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 
 async function api(path, options = {}, retry = true) {
   const headers = new Headers(options.headers || {});
@@ -129,6 +159,8 @@ function showConsole() {
   prototype.hidden = false;
   document.querySelector(".service-state").innerHTML = `<span class="connected"></span>服务已连接`;
   syncAccountChrome();
+  state.cloudEventVersion = loadCloudCursor();
+  startSettingsStream();
   setView(isAdmin() ? "overview" : "schedules");
 }
 
@@ -264,16 +296,13 @@ async function signOut(callAPI) {
   if (callAPI && state.session) {
     try { await api("/api/v1/auth/logout", { method: "POST", body: JSON.stringify({ refreshToken: state.session.refreshToken }) }, false); } catch { /* local sign-out still proceeds */ }
   }
+  stopSettingsStream();
   saveSession(null); state.account = null; showAuth();
 }
 
 async function setView(view) {
   if (!viewCopy[view] || (!isAdmin() && ["overview", "users", "redeem", "mail", "audit", "releases"].includes(view))) view = "schedules";
   state.view = view;
-  if (view !== "settings" && state.settingsStreamAbort) {
-    state.settingsStreamAbort.abort();
-    state.settingsStreamAbort = null;
-  }
   navItems.forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.getElementById("viewCrumb").textContent = viewCopy[view][0];
   document.body.classList.remove("nav-open");
@@ -498,21 +527,30 @@ function readMobileSettings(document) {
   return values;
 }
 
-async function fetchCloudDocument(retry = true) {
+async function fetchCloudDocument(retry = true, minimumVersion = 0, staleAttempt = 0) {
   const headers = { Authorization: `Bearer ${state.session.accessToken}`, Accept: "application/json" };
   const response = await fetch("/api/v1/cloud/official/document", { headers });
-  if (response.status === 401 && retry && await refreshSession()) return fetchCloudDocument(false);
+  if (response.status === 401 && retry && await refreshSession()) return fetchCloudDocument(false, minimumVersion, staleAttempt);
   const text = await response.text();
   if (!response.ok) {
     let body = {}; try { body = JSON.parse(text); } catch { body.message = text; }
     const error = new Error(body.message || `HTTP ${response.status}`); error.status = response.status; throw error;
   }
-  return { document: text ? JSON.parse(text) : {}, etag: response.headers.get("ETag") || '"0"' };
+  const etag = response.headers.get("ETag") || '"0"';
+  const version = Number(String(etag).replace(/\D/g, "")) || 0;
+  if (version < minimumVersion && staleAttempt < 3) {
+    await sleep(100 * (staleAttempt + 1));
+    return fetchCloudDocument(retry, minimumVersion, staleAttempt + 1);
+  }
+  saveCloudCursor(version);
+  return { document: text ? JSON.parse(text) : {}, etag, version };
 }
 
-async function saveMobileSettings(document, etag, values) {
+async function saveMobileSettings(document, etag, values, attempt = 0, retryAuth = true) {
+  const baseDocument = JSON.parse(JSON.stringify(document || {}));
+  document = JSON.parse(JSON.stringify(baseDocument));
   const now = Date.now();
-  const deviceId = `web-${String(state.account.userId || "account").slice(-12)}`;
+  const deviceId = browserDeviceId();
   document.format = "classing_cloud_sync_v2";
   document.records ||= {};
   const records = document.records["mobile.settings"] ||= [];
@@ -532,32 +570,109 @@ async function saveMobileSettings(document, etag, values) {
   if (deviceIndex >= 0) document.devices[deviceIndex] = device; else document.devices.push(device);
   document.changes = document.changes.slice(0, 100);
   document.updatedAt = now;
-  const response = await fetch("/api/v1/cloud/official/document", { method: "PUT", headers: { Authorization: `Bearer ${state.session.accessToken}`, "Content-Type": "application/json", "If-Match": etag }, body: JSON.stringify(document) });
-  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.message || `HTTP ${response.status}`); }
+  const response = await fetch("/api/v1/cloud/official/document", {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${state.session.accessToken}`,
+      "Content-Type": "application/json",
+      "If-Match": etag,
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify(document),
+  });
+  if (response.status === 401 && retryAuth && await refreshSession()) {
+    return saveMobileSettings(baseDocument, etag, values, attempt, false);
+  }
+  if (response.status === 412 && attempt < 3) {
+    await sleep(150 * (attempt + 1));
+    const latest = await fetchCloudDocument();
+    return saveMobileSettings(latest.document, latest.etag, values, attempt + 1);
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.message || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = body.code;
+    throw error;
+  }
+  saveCloudCursor(Number(body.version || 0));
+  return body;
 }
 
-async function startSettingsStream(version) {
+function stopSettingsStream() {
   state.settingsStreamAbort?.abort();
+  state.settingsStreamAbort = null;
+  if (state.settingsStreamRetry) clearTimeout(state.settingsStreamRetry);
+  state.settingsStreamRetry = null;
+}
+
+function scheduleSettingsStream(delay = 3000) {
+  if (!state.session || state.settingsStreamRetry) return;
+  state.settingsStreamRetry = setTimeout(() => {
+    state.settingsStreamRetry = null;
+    startSettingsStream();
+  }, delay);
+}
+
+async function applyCloudEventBlock(block) {
+  let eventName = "message"; let eventId = ""; let data = "";
+  block.split("\n").forEach((line) => {
+    if (line.startsWith("event:")) eventName = line.slice(6).trim();
+    else if (line.startsWith("id:")) eventId = line.slice(3).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  });
+  if (eventName !== "cloud-document") return;
+  let payload = {}; try { payload = JSON.parse(data || "{}"); } catch { return; }
+  const version = Number(payload.version ?? eventId);
+  if (!Number.isSafeInteger(version) || version <= state.cloudEventVersion) return;
+  saveCloudCursor(version);
+  if (state.view !== "settings" || state.settingsRendering) return;
+  if (state.settingsFormDirty) {
+    const status = document.querySelector("#clientSettingsForm")?.closest(".runtime-panel")?.querySelector(".status-pill");
+    if (status) status.textContent = "云端有新设置，保存后将自动合并";
+    return;
+  }
+  await renderSettings();
+}
+
+async function startSettingsStream() {
+  if (!state.session || state.settingsStreamAbort) return;
   const controller = new AbortController(); state.settingsStreamAbort = controller;
+  let reconnectDelay = 3000;
   try {
-    const response = await fetch("/api/v1/cloud/official/events", { headers: { Authorization: `Bearer ${state.session.accessToken}`, "Last-Event-ID": String(version || 0) }, signal: controller.signal });
-    if (!response.ok || !response.body) return;
+    const headers = { Authorization: `Bearer ${state.session.accessToken}` };
+    if (state.cloudEventVersion > 0) headers["Last-Event-ID"] = String(state.cloudEventVersion);
+    const response = await fetch("/api/v1/cloud/official/events", { headers, signal: controller.signal });
+    if (response.status === 401 && await refreshSession()) { reconnectDelay = 0; return; }
+    if (!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-    while (state.view === "settings") {
+    while (state.session && !controller.signal.aborted) {
       const { value, done } = await reader.read(); if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      if (buffer.includes("event: settings") && buffer.includes("\n\n")) {
-        buffer = ""; await renderSettings(); return;
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary).replace(/\r/g, "");
+        buffer = buffer.slice(boundary + 2);
+        if (block && !block.startsWith(":")) await applyCloudEventBlock(block);
+        boundary = buffer.indexOf("\n\n");
       }
       if (buffer.length > 8192) buffer = buffer.slice(-4096);
     }
-  } catch (error) { if (error.name !== "AbortError") setTimeout(() => state.view === "settings" && startSettingsStream(version), 3000); }
+  } catch (error) {
+    if (error.name === "AbortError") reconnectDelay = -1;
+  } finally {
+    if (state.settingsStreamAbort === controller) state.settingsStreamAbort = null;
+    if (reconnectDelay >= 0 && state.session) scheduleSettingsStream(reconnectDelay);
+  }
 }
 
 async function renderSettings() {
+  if (state.settingsRendering) return;
+  state.settingsRendering = true;
+  try {
   const settings = isAdmin() ? await api("/api/v1/admin/settings") : { settings: {} };
   let cloud = null; let mobileSettings = {}; let cloudError = "";
-  try { cloud = await fetchCloudDocument(); mobileSettings = readMobileSettings(cloud.document); } catch (error) { cloudError = error.message; }
+  try { cloud = await fetchCloudDocument(true, state.cloudEventVersion); mobileSettings = readMobileSettings(cloud.document); } catch (error) { cloudError = error.message; }
   setFab("编辑设置");
   content.innerHTML = `<div class="runtime-page">${hero("settings", `<div class="hero-stat"><strong>${escapeHTML(state.account.role)}</strong><span>${escapeHTML(state.account.status)}</span></div>`)}<div class="runtime-grid">
     <section class="runtime-panel half"><div class="runtime-panel-header"><h2>个人资料</h2><span class="status-pill">${escapeHTML(state.account.role)}</span></div><form class="runtime-form" id="profileForm"><label class="form-field full"><span>用户名</span><input name="username" value="${escapeHTML(state.account.username)}" required minlength="3" maxlength="40"></label><label class="form-field full"><span>邮箱</span><input name="email" type="email" value="${escapeHTML(state.account.email)}" required></label><div class="runtime-actions full"><button class="primary-button">保存资料</button></div></form></section>
@@ -567,9 +682,21 @@ async function renderSettings() {
   </div></div>`;
   document.getElementById("profileForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { state.account = (await api("/api/v1/account/me", { method: "PATCH", body: JSON.stringify(data) })).account; syncAccountChrome(); toast("个人资料已更新"); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("passwordForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); if (data.newPassword !== data.confirmPassword) { toast("两次输入的新密码不一致", "error"); return; } try { await api("/api/v1/account/password", { method: "PUT", body: JSON.stringify({ currentPassword: data.currentPassword, newPassword: data.newPassword }) }); toast("密码已更新，请重新登录"); setTimeout(() => signOut(false), 900); } catch (error) { toast(error.message, "error"); } });
-  document.getElementById("clientSettingsForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); const values = { showWeekend: data.showWeekend === "true", weekNumberMode: data.weekNumberMode, semesterWeekStartDate: data.semesterWeekStartDate, reminderEnabled: data.reminderEnabled === "true", reminderMinutes: Number(data.reminderMinutes), keepAliveLevel: data.keepAliveLevel, dailyBriefingEnabled: data.dailyBriefingEnabled === "true", dailyBriefingTime: data.dailyBriefingTime }; try { await saveMobileSettings(cloud.document, cloud.etag, values); toast("客户端设置已同步"); await renderSettings(); } catch (error) { toast(error.message, "error"); } });
+  const clientSettingsForm = document.getElementById("clientSettingsForm");
+  state.settingsFormDirty = false;
+  state.settingsDirtyFields.clear();
+  const markSettingsFieldDirty = (event) => {
+    if (!event.target.name) return;
+    state.settingsFormDirty = true;
+    state.settingsDirtyFields.add(event.target.name);
+  };
+  clientSettingsForm?.addEventListener("input", markSettingsFieldDirty);
+  clientSettingsForm?.addEventListener("change", markSettingsFieldDirty);
+  clientSettingsForm?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); const formValues = { showWeekend: data.showWeekend === "true", weekNumberMode: data.weekNumberMode, semesterWeekStartDate: data.semesterWeekStartDate, reminderEnabled: data.reminderEnabled === "true", reminderMinutes: Number(data.reminderMinutes), keepAliveLevel: data.keepAliveLevel, dailyBriefingEnabled: data.dailyBriefingEnabled === "true", dailyBriefingTime: data.dailyBriefingTime }; const values = Object.fromEntries(Array.from(state.settingsDirtyFields).filter((name) => Object.hasOwn(formValues, name)).map((name) => [name, formValues[name]])); if (!Object.keys(values).length) { toast("没有需要同步的更改"); return; } try { await saveMobileSettings(cloud.document, cloud.etag, values); state.settingsFormDirty = false; state.settingsDirtyFields.clear(); toast("客户端设置已同步"); state.settingsRendering = false; await renderSettings(); } catch (error) { toast(error.message, "error"); } });
   document.getElementById("systemSettingsForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); try { await api("/api/v1/admin/settings", { method: "PUT", body: JSON.stringify({ settings: data }) }); toast("系统设置已更新"); } catch (error) { toast(error.message, "error"); } });
-  if (cloud) startSettingsStream(Number(String(cloud.etag).replace(/\D/g, "")) || 0);
+  } finally {
+    state.settingsRendering = false;
+  }
 }
 
 boot();

@@ -88,3 +88,23 @@ func TestCloudETagParsers(t *testing.T) {
 		t.Fatal("ETag matching did not honor strong/weak candidate lists")
 	}
 }
+
+func TestCloudEventCursorAndPayloadUseDocumentVersion(t *testing.T) {
+	version, present, err := parseCloudEventCursor(" 12 ")
+	if err != nil || !present || version != 12 {
+		t.Fatalf("cursor = %d present=%v err=%v", version, present, err)
+	}
+	if version, present, err = parseCloudEventCursor(""); err != nil || present || version != 0 {
+		t.Fatalf("empty cursor = %d present=%v err=%v", version, present, err)
+	}
+	for _, invalid := range []string{"-1", "evt_123", `"12"`} {
+		if _, _, err = parseCloudEventCursor(invalid); err == nil {
+			t.Errorf("invalid event cursor accepted: %q", invalid)
+		}
+	}
+	event := formatCloudDocumentEvent(7, 1234)
+	if !strings.Contains(event, "id: 7\n") || !strings.Contains(event, "event: cloud-document\n") ||
+		!strings.Contains(event, `"updatedAt":1234`) || !strings.Contains(event, `"version":7`) {
+		t.Fatalf("unexpected cloud event: %q", event)
+	}
+}

@@ -271,22 +271,51 @@ func cloudJSONDepth(value any, depth int) int {
 	return maxDepth
 }
 
+var (
+	cloudEventPollInterval      = time.Second
+	cloudEventKeepAliveInterval = 20 * time.Second
+)
+
 func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, r, http.StatusNotImplemented, "OFFICIAL_CLOUD_EVENTS_UNAVAILABLE", "streaming is unavailable")
 		return
 	}
+	cursor, hasCursor, err := parseCloudEventCursor(r.Header.Get("Last-Event-ID"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "OFFICIAL_CLOUD_EVENT_CURSOR_INVALID", "Last-Event-ID must be a non-negative document version")
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
-	ticker := time.NewTicker(time.Second)
-	keepAlive := time.NewTicker(20 * time.Second)
+	ticker := time.NewTicker(cloudEventPollInterval)
+	keepAlive := time.NewTicker(cloudEventKeepAliveInterval)
 	defer ticker.Stop()
 	defer keepAlive.Stop()
 	userID := principal(r).User.ID
+	writeLatest := func(force bool) bool {
+		item, loadErr := s.store.CloudDocument(r.Context(), userID)
+		if loadErr == store.ErrNotFound {
+			item = store.CloudDocument{UserID: userID, Version: 0, UpdatedAt: 0}
+		} else if loadErr != nil {
+			return false
+		}
+		if !force && item.Version <= cursor {
+			return true
+		}
+		if _, writeErr := io.WriteString(w, formatCloudDocumentEvent(item.Version, item.UpdatedAt)); writeErr != nil {
+			return false
+		}
+		cursor = item.Version
+		flusher.Flush()
+		return true
+	}
+	if !hasCursor && !writeLatest(true) {
+		return
+	}
 	for {
 		select {
 		case <-r.Context().Done():
@@ -295,19 +324,28 @@ func (s *Server) cloudEvents(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.WriteString(w, ": keep-alive\n\n")
 			flusher.Flush()
 		case <-ticker.C:
-			events, err := s.store.RuntimeEvents(r.Context(), userID, lastEventID, 100)
-			if err != nil {
+			if !writeLatest(false) {
 				return
-			}
-			for _, event := range events {
-				lastEventID = event.ID
-				_, _ = io.WriteString(w, "id: "+event.ID+"\nevent: "+event.EventType+"\ndata: "+event.Payload+"\n\n")
-			}
-			if len(events) > 0 {
-				flusher.Flush()
 			}
 		}
 	}
+}
+
+func parseCloudEventCursor(value string) (int64, bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false, nil
+	}
+	version, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || version < 0 {
+		return 0, false, store.ErrInvalid
+	}
+	return version, true, nil
+}
+
+func formatCloudDocumentEvent(version, updatedAt int64) string {
+	payload, _ := json.Marshal(map[string]int64{"version": version, "updatedAt": updatedAt})
+	return "id: " + strconv.FormatInt(version, 10) + "\nevent: cloud-document\ndata: " + string(payload) + "\n\n"
 }
 
 func writeCloudJSON(w http.ResponseWriter, payload []byte) {

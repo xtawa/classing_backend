@@ -95,9 +95,11 @@ Web 端直接读写官方云 `classing_cloud_sync_v2` 文档的 `mobile.settings
 
 - 认证：`Authorization: Bearer <accessToken>`。
 - 响应：`text/event-stream`。
-- 客户端可在 `Last-Event-ID` 传入已知文档版本。
-- 事件名：`settings`；数据包含 `version` 与 `updatedAt`。
-- 浏览器管理台使用带 Authorization 的 Fetch 流读取事件，收到事件后重新拉取官方云文档。
+- 客户端可在 `Last-Event-ID` 传入已知的非负整数文档版本；该值与文档 `ETag` 中的版本一致。
+- 未提供游标时服务端立即发送当前版本；游标落后时只发送最新版本，无需重放中间写入。
+- 事件名：`cloud-document`；事件 ID 为文档版本，数据仅包含 `version` 与 `updatedAt`，不包含设置正文。
+- 服务端每 20 秒发送 keep-alive。客户端断线后携带最后收到的事件 ID 重连，收到事件后重新拉取并合并官方云文档。
+- 浏览器与 Android 前台使用带 Authorization 的 Fetch/HTTP 流；Android 后台停止长连接，恢复前台时主动补拉并由周期任务兜底。
 
 ## 3. 公告与版本检测限流
 
@@ -116,4 +118,3 @@ Web 端直接读写官方云 `classing_cloud_sync_v2` 文档的 `mobile.settings
   - `PUT /api/v1/admin/mailboxes/{id}`
   - `DELETE /api/v1/admin/mailboxes/{id}`
 - SMTP 密码仍只保存 `env:VARIABLE_NAME` 引用，管理台和 API 不接收明文密码。
-
