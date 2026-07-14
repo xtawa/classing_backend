@@ -173,15 +173,16 @@ func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStart
 		return AIStartResult{}, err
 	}
 	var replayRequest struct {
+		RequestID      string `db:"id"`
 		ConversationID string `db:"conversation_id"`
 		Status         string `db:"status"`
 		QuotaCounted   int    `db:"quota_counted"`
 	}
-	err = tx.GetContext(ctx, &replayRequest, s.rebind(`SELECT conversation_id, status, quota_counted FROM ai_requests WHERE user_id=? AND client_request_id=?`), userID, input.ClientRequestID)
+	err = tx.GetContext(ctx, &replayRequest, s.rebind(`SELECT id, conversation_id, status, quota_counted FROM ai_requests WHERE user_id=? AND client_request_id=?`), userID, input.ClientRequestID)
 	if err == nil {
 		var message model.AIMessage
 		if replayRequest.Status == "COMPLETE" {
-			_ = tx.GetContext(ctx, &message, s.rebind(`SELECT * FROM ai_messages WHERE conversation_id=? AND role='ASSISTANT' ORDER BY created_at DESC LIMIT 1`), replayRequest.ConversationID)
+			_ = tx.GetContext(ctx, &message, s.rebind(`SELECT * FROM ai_messages WHERE conversation_id=? AND role='ASSISTANT' AND client_request_id=? LIMIT 1`), replayRequest.ConversationID, replayRequest.RequestID)
 		}
 		var conversation model.AIConversation
 		_ = tx.GetContext(ctx, &conversation, s.rebind(`SELECT * FROM ai_conversations WHERE id=?`), replayRequest.ConversationID)
@@ -329,7 +330,7 @@ func (s *Store) FinishAIRequest(ctx context.Context, requestID, response, status
 		return err
 	}
 	if response != "" {
-		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,created_at,completed_at) VALUES (?,?,'ASSISTANT',?,'COMPLETE',?,?)`), ids.New("aim"), req.ConversationID, response, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,client_request_id,created_at,completed_at) VALUES (?,?,'ASSISTANT',?,'COMPLETE',?,?,?)`), ids.New("aim"), req.ConversationID, response, requestID, now, now); err != nil {
 			return err
 		}
 	}

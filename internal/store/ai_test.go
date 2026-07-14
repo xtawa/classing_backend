@@ -37,13 +37,39 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if err := data.FinishAIRequest(ctx, started.RequestID, "Math is next.", "COMPLETE", "", 25); err != nil {
 				t.Fatalf("finish AI request: %v", err)
 			}
+			followUp, err := data.StartAIRequest(ctx, user.ID, AIStartInput{
+				ConversationID:  started.Conversation.ID,
+				ClientRequestID: "request-2",
+				Message:         "And after that?",
+			})
+			if err != nil {
+				t.Fatalf("start follow-up AI request: %v", err)
+			}
+			if _, err := data.CommitAIQuota(ctx, followUp.RequestID); err != nil {
+				t.Fatalf("commit follow-up AI quota: %v", err)
+			}
+			if err := data.FinishAIRequest(ctx, followUp.RequestID, "Physics follows.", "COMPLETE", "", 25); err != nil {
+				t.Fatalf("finish follow-up AI request: %v", err)
+			}
 
 			var messages []model.AIMessage
 			if err := data.db.SelectContext(ctx, &messages, data.rebind(`SELECT * FROM ai_messages WHERE conversation_id=? ORDER BY created_at, role DESC`), started.Conversation.ID); err != nil {
 				t.Fatalf("list AI messages: %v", err)
 			}
-			if len(messages) != 2 || messages[0].Role != "USER" || messages[0].Status != "COMPLETE" || messages[1].Role != "ASSISTANT" || messages[1].Content != "Math is next." {
+			if len(messages) != 4 {
 				t.Fatalf("unexpected persisted messages: %+v", messages)
+			}
+			assistantReplies := map[string]string{}
+			for _, message := range messages {
+				if message.Role == "USER" && message.Status != "COMPLETE" {
+					t.Fatalf("user message was not completed: %+v", message)
+				}
+				if message.Role == "ASSISTANT" {
+					assistantReplies[message.ClientRequestID] = message.Content
+				}
+			}
+			if assistantReplies[started.RequestID] != "Math is next." || assistantReplies[followUp.RequestID] != "Physics follows." {
+				t.Fatalf("assistant replies not associated with requests: %+v", assistantReplies)
 			}
 		})
 	}
