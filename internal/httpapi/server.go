@@ -27,6 +27,8 @@ type Server struct {
 	briefingTestAccountLimiter *rateLimiter
 	cloudWriteAccountLimiter   *rateLimiter
 	accountWriteAccountLimiter *rateLimiter
+	aiIPLimiter                *rateLimiter
+	aiAccountLimiter           *rateLimiter
 	refreshReplays             *refreshReplayCache
 	shuttingDown               atomic.Bool
 	startedAt                  time.Time
@@ -47,6 +49,8 @@ func New(cfg config.Config, data *store.Store, web fs.FS, logger *slog.Logger) *
 		briefingTestAccountLimiter: newRateLimiter(briefingTestAccountLimit, time.Minute),
 		cloudWriteAccountLimiter:   newRateLimiter(cloudWriteAccountLimit, time.Minute),
 		accountWriteAccountLimiter: newRateLimiter(accountWriteAccountLimit, time.Minute),
+		aiIPLimiter:                newRateLimiter(30, time.Minute),
+		aiAccountLimiter:           newRateLimiter(8, time.Minute),
 		refreshReplays:             newRefreshReplayCache(5 * time.Second),
 		startedAt:                  time.Now(),
 	}
@@ -81,7 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/membership/status", s.requireAuth(http.HandlerFunc(s.membershipStatus)))
 	mux.Handle("POST /api/v1/membership/redeem", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.redeemAccountLimiter)(http.HandlerFunc(s.redeemMembership))))
 
-	mux.Handle("POST /api/v1/ai/chat", s.requireAuth(http.HandlerFunc(s.aiChat)))
+	mux.Handle("POST /api/v1/ai/chat", s.requireAuth(s.sensitiveLimit(s.aiIPLimiter, s.aiAccountLimiter)(http.HandlerFunc(s.aiChat))))
 	mux.Handle("GET /api/v1/ai/usage/me", s.requireAuth(http.HandlerFunc(s.aiUsage)))
 	mux.Handle("GET /api/v1/ai/conversations", s.requireAuth(http.HandlerFunc(s.aiListConversations)))
 	mux.Handle("GET /api/v1/ai/conversations/{id}/messages", s.requireAuth(http.HandlerFunc(s.aiMessages)))
