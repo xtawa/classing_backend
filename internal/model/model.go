@@ -134,6 +134,59 @@ type AppRelease struct {
 	UpdatedAt               int64  `db:"updated_at" json:"updatedAt"`
 }
 
+// AIConfig is the single active OpenAI-compatible provider configuration.
+// The API key is never stored here; SecretRef only identifies an approved
+// environment variable.
+type AIConfig struct {
+	Enabled              int     `db:"enabled" json:"enabled"`
+	ProviderKind         string  `db:"provider_kind" json:"providerKind"`
+	BaseURL              string  `db:"base_url" json:"baseUrl"`
+	Model                string  `db:"model" json:"model"`
+	SecretRef            string  `db:"secret_ref" json:"secretRef"`
+	SystemPrompt         string  `db:"system_prompt" json:"systemPrompt"`
+	TimetablePrompt      string  `db:"timetable_prompt" json:"timetablePrompt"`
+	Temperature          float64 `db:"temperature" json:"temperature"`
+	MaxOutputTokens      int     `db:"max_output_tokens" json:"maxOutputTokens"`
+	TimeoutSeconds       int     `db:"timeout_seconds" json:"timeoutSeconds"`
+	MaxHistoryMessages   int     `db:"max_history_messages" json:"maxHistoryMessages"`
+	DefaultMonthlyLimit  int     `db:"default_monthly_limit" json:"defaultMonthlyLimit"`
+	QuotaTimezone        string  `db:"quota_timezone" json:"quotaTimezone"`
+	Version              int64   `db:"version" json:"version"`
+	UpdatedBy            string  `db:"updated_by" json:"updatedBy"`
+	UpdatedAt            int64   `db:"updated_at" json:"updatedAt"`
+}
+
+type AIConversation struct {
+	ID              string `db:"id" json:"conversationId"`
+	UserID          string `db:"user_id" json:"-"`
+	Title           string `db:"title" json:"title"`
+	Timetable       string `db:"timetable_snapshot" json:"-"`
+	TimetableHash   string `db:"timetable_hash" json:"-"`
+	SourceProjectID string `db:"source_project_id" json:"sourceProjectId,omitempty"`
+	CreatedAt       int64  `db:"created_at" json:"createdAt"`
+	UpdatedAt       int64  `db:"updated_at" json:"updatedAt"`
+}
+
+type AIMessage struct {
+	ID              string `db:"id" json:"messageId"`
+	ConversationID  string `db:"conversation_id" json:"conversationId"`
+	Role            string `db:"role" json:"role"`
+	Content         string `db:"content" json:"content"`
+	Status          string `db:"status" json:"status"`
+	ClientRequestID string `db:"client_request_id" json:"clientRequestId,omitempty"`
+	CreatedAt       int64  `db:"created_at" json:"createdAt"`
+	CompletedAt     int64  `db:"completed_at" json:"completedAt"`
+}
+
+type AIUsage struct {
+	Period    string `db:"period" json:"period"`
+	Limit     int    `db:"monthly_limit" json:"limit"`
+	Used      int    `db:"used" json:"used"`
+	Reserved  int    `db:"reserved" json:"reserved"`
+	Mode      string `db:"mode" json:"mode"`
+	ResetAt   int64  `db:"reset_at" json:"resetAt"`
+}
+
 const (
 	RoleAdmin = "ADMIN"
 	RoleUser  = "USER"

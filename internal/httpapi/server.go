@@ -81,6 +81,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/membership/status", s.requireAuth(http.HandlerFunc(s.membershipStatus)))
 	mux.Handle("POST /api/v1/membership/redeem", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.redeemAccountLimiter)(http.HandlerFunc(s.redeemMembership))))
 
+	mux.Handle("POST /api/v1/ai/chat", s.requireAuth(http.HandlerFunc(s.aiChat)))
+	mux.Handle("GET /api/v1/ai/usage/me", s.requireAuth(http.HandlerFunc(s.aiUsage)))
+	mux.Handle("GET /api/v1/ai/conversations", s.requireAuth(http.HandlerFunc(s.aiListConversations)))
+	mux.Handle("GET /api/v1/ai/conversations/{id}/messages", s.requireAuth(http.HandlerFunc(s.aiMessages)))
+	mux.Handle("DELETE /api/v1/ai/conversations/{id}", s.requireAuth(http.HandlerFunc(s.aiDeleteConversation)))
+
 	mux.Handle("GET /api/v1/timetables", s.requireAuth(http.HandlerFunc(s.listTimetables)))
 	mux.Handle("POST /api/v1/timetables", s.requireAuth(http.HandlerFunc(s.createTimetable)))
 	mux.Handle("GET /api/v1/timetables/{id}", s.requireAuth(http.HandlerFunc(s.getTimetable)))
@@ -124,6 +130,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/admin/releases", s.requireAdmin(http.HandlerFunc(s.adminUploadRelease)))
 	mux.Handle("POST /api/v1/admin/releases/{id}/publish", s.requireAdmin(http.HandlerFunc(s.adminPublishRelease)))
 	mux.Handle("DELETE /api/v1/admin/releases/{id}", s.requireAdmin(http.HandlerFunc(s.adminDeleteRelease)))
+	mux.Handle("GET /api/v1/admin/ai/config", s.requireAdmin(http.HandlerFunc(s.adminAIConfig)))
+	mux.Handle("PUT /api/v1/admin/ai/config", s.requireAdmin(http.HandlerFunc(s.adminSetAIConfig)))
+	mux.Handle("POST /api/v1/admin/ai/config/test", s.requireAdmin(http.HandlerFunc(s.adminTestAIConfig)))
+	mux.Handle("GET /api/v1/admin/ai/usage", s.requireAdmin(http.HandlerFunc(s.adminAIUsage)))
+	mux.Handle("PUT /api/v1/admin/ai/quotas/default", s.requireAdmin(http.HandlerFunc(s.adminSetAIDefaultQuota)))
+	mux.Handle("PUT /api/v1/admin/ai/quotas", s.requireAdmin(http.HandlerFunc(s.adminSetAIQuota)))
 
 	mux.Handle("/", s.spaHandler())
 	return s.middleware(mux)

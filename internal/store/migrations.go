@@ -281,6 +281,83 @@ var migrations = []string{
 		created_at BIGINT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_briefing_job_logs_job ON briefing_job_logs(job_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS ai_config (
+		id INTEGER PRIMARY KEY,
+		enabled INTEGER NOT NULL DEFAULT 0,
+		provider_kind TEXT NOT NULL DEFAULT 'OPENAI_COMPATIBLE',
+		base_url TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		secret_ref TEXT NOT NULL DEFAULT '',
+		system_prompt TEXT NOT NULL DEFAULT '',
+		timetable_prompt TEXT NOT NULL DEFAULT '',
+		temperature REAL NOT NULL DEFAULT 0.2,
+		max_output_tokens INTEGER NOT NULL DEFAULT 1024,
+		timeout_seconds INTEGER NOT NULL DEFAULT 60,
+		max_history_messages INTEGER NOT NULL DEFAULT 40,
+		default_monthly_limit INTEGER NOT NULL DEFAULT 0,
+		quota_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+		version BIGINT NOT NULL DEFAULT 1,
+		updated_by TEXT NOT NULL DEFAULT '',
+		updated_at BIGINT NOT NULL DEFAULT 0,
+		CHECK (id = 1)
+	)`,
+	`INSERT INTO ai_config (id, updated_at) SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM ai_config WHERE id = 1)`,
+	`CREATE TABLE IF NOT EXISTS ai_user_quotas (
+		user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		mode TEXT NOT NULL DEFAULT 'INHERIT',
+		monthly_limit INTEGER NOT NULL DEFAULT 0,
+		updated_by TEXT NOT NULL DEFAULT '',
+		updated_at BIGINT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS ai_usage_monthly (
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		period TEXT NOT NULL,
+		used INTEGER NOT NULL DEFAULT 0,
+		reserved INTEGER NOT NULL DEFAULT 0,
+		updated_at BIGINT NOT NULL,
+		PRIMARY KEY (user_id, period)
+	)`,
+	`CREATE TABLE IF NOT EXISTS ai_conversations (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		title TEXT NOT NULL,
+		timetable_snapshot TEXT NOT NULL,
+		timetable_hash TEXT NOT NULL,
+		source_project_id TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL,
+		updated_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ai_conversations_user ON ai_conversations(user_id, updated_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS ai_messages (
+		id TEXT PRIMARY KEY,
+		conversation_id TEXT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+		role TEXT NOT NULL,
+		content TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'COMPLETE',
+		client_request_id TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL,
+		completed_at BIGINT NOT NULL DEFAULT 0,
+		UNIQUE (conversation_id, client_request_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ai_messages_conversation ON ai_messages(conversation_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS ai_requests (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		conversation_id TEXT NOT NULL REFERENCES ai_conversations(id) ON DELETE CASCADE,
+		client_request_id TEXT NOT NULL,
+		provider_kind TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL,
+		quota_counted INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		latency_ms INTEGER NOT NULL DEFAULT 0,
+		error_code TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL,
+		completed_at BIGINT NOT NULL DEFAULT 0,
+		UNIQUE (user_id, client_request_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ai_requests_user_period ON ai_requests(user_id, created_at DESC)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
