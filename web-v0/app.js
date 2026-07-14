@@ -508,7 +508,7 @@ async function sendAIMessage(message, projectId) {
   const stream = document.querySelector("#aiStreaming p");
   try {
     const payload = { conversationId: state.aiConversationId || undefined, clientRequestId: crypto.randomUUID(), message };
-    if (!state.aiConversationId) { const project = await api(`/api/v1/timetables/${projectId}`); payload.timetableSnapshot = project.project.document; payload.sourceProjectId = projectId; }
+    if (!state.aiConversationId) { payload.timetableSnapshot = await loadAITimetableSnapshot(projectId); payload.sourceProjectId = projectId; }
     const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${state.session.accessToken}` };
     const response = await safeFetch("/api/v1/ai/chat", { method: "POST", headers, body: JSON.stringify(payload) });
     if (!response.ok || !response.body) { const error = await response.json().catch(() => ({})); throw new Error(error.message || "Ask AI 暂时不可用"); }
@@ -516,6 +516,21 @@ async function sendAIMessage(message, projectId) {
     while (true) { const { value, done } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true }); const lines = pending.split("\n"); pending = lines.pop(); for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); if (line.startsWith("data:")) { const data = JSON.parse(line.slice(5)); if (event === "conversation") state.aiConversationId = data.conversationId; if (event === "delta") stream.textContent += data.text; if (event === "error") throw new Error(data.message || data.code); event = ""; } } }
   } catch (error) { stream.textContent = `请求失败：${error.message}`; toast(error.message, "error"); }
   finally { formButton.disabled = false; target.scrollTop = target.scrollHeight; }
+}
+
+async function loadAITimetableSnapshot(projectId) {
+  if (projectId) {
+    const project = await api(`/api/v1/timetables/${projectId}`);
+    if (Array.isArray(project.project.document?.lessons) && project.project.document.lessons.length) return project.project.document;
+  }
+  const cloud = await fetchCloudDocument();
+  const records = cloud.document?.records || {};
+  const livePayloads = (domain) => (records[domain] || []).filter((item) => !item.deletedAt && item.payload).map((item) => {
+    try { return JSON.parse(item.payload); } catch { return null; }
+  }).filter(Boolean);
+  const snapshot = { lessons: livePayloads("timetable.lessons"), exceptions: livePayloads("timetable.exceptions") };
+  if (!snapshot.lessons.length) throw new Error("当前课表没有课程，请先在 Mobile 同步课表或为所选项目添加课程");
+  return snapshot;
 }
 
 async function renderAIAdmin() {

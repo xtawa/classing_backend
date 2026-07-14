@@ -55,9 +55,13 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "AI_TIMETABLE_REQUIRED", "a valid timetable snapshot is required for a new conversation")
 		return
 	}
-	if body.ConversationID == "" && !validAITimetable(body.Timetable) {
-		writeError(w, r, http.StatusBadRequest, "AI_TIMETABLE_INVALID", "timetable snapshot must contain lessons")
-		return
+	if body.ConversationID == "" {
+		normalized, err := normalizeAITimetable(body.Timetable)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "AI_TIMETABLE_INVALID", "timetable snapshot must contain lessons")
+			return
+		}
+		body.Timetable = normalized
 	}
 	started, err := s.store.StartAIRequest(r.Context(), principal(r).User.ID, store.AIStartInput{ConversationID: body.ConversationID, ClientRequestID: body.ClientRequestID, Message: body.Message, Timetable: string(body.Timetable), SourceProjectID: body.SourceProjectID})
 	if err != nil {
@@ -131,11 +135,59 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 	writeSSE(w, "done", map[string]any{"requestId": started.RequestID, "inputTokens": usage.Used, "outputTokens": 0})
 }
 
-func validAITimetable(raw []byte) bool {
+func normalizeAITimetable(raw []byte) (json.RawMessage, error) {
 	var root struct {
-		Lessons []json.RawMessage `json:"lessons"`
+		Lessons    []json.RawMessage `json:"lessons"`
+		Exceptions []json.RawMessage `json:"exceptions"`
+		Timetable  *struct {
+			Lessons     []json.RawMessage `json:"lessons"`
+			BaseLessons []json.RawMessage `json:"baseLessons"`
+			Exceptions  []json.RawMessage `json:"exceptions"`
+		} `json:"timetable"`
+		Records map[string][]struct {
+			Payload   *string         `json:"payload"`
+			DeletedAt json.RawMessage `json:"deletedAt"`
+		} `json:"records"`
 	}
-	return json.Unmarshal(raw, &root) == nil && len(root.Lessons) > 0 && len(root.Lessons) <= 2000
+	if json.Unmarshal(raw, &root) != nil {
+		return nil, store.ErrInvalid
+	}
+	if len(root.Lessons) > 0 && len(root.Lessons) <= 2000 && len(root.Exceptions) <= 2000 {
+		return json.RawMessage(raw), nil
+	}
+	lessons, exceptions := root.Lessons, root.Exceptions
+	if root.Timetable != nil {
+		lessons = root.Timetable.BaseLessons
+		if len(lessons) == 0 {
+			lessons = root.Timetable.Lessons
+		}
+		exceptions = root.Timetable.Exceptions
+	}
+	if len(lessons) == 0 {
+		lessons = liveAIRecords(root.Records["timetable.lessons"])
+		exceptions = liveAIRecords(root.Records["timetable.exceptions"])
+	}
+	if len(lessons) == 0 || len(lessons) > 2000 || len(exceptions) > 2000 {
+		return nil, store.ErrInvalid
+	}
+	return json.Marshal(map[string]any{"lessons": lessons, "exceptions": exceptions})
+}
+
+func liveAIRecords(records []struct {
+	Payload   *string         `json:"payload"`
+	DeletedAt json.RawMessage `json:"deletedAt"`
+}) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(records))
+	for _, record := range records {
+		if record.Payload == nil || strings.TrimSpace(*record.Payload) == "" || (len(record.DeletedAt) > 0 && string(record.DeletedAt) != "null") {
+			continue
+		}
+		payload := json.RawMessage(*record.Payload)
+		if json.Valid(payload) {
+			result = append(result, payload)
+		}
+	}
+	return result
 }
 func startSSE(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
