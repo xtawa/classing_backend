@@ -216,7 +216,7 @@ func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStart
 	}
 	requestID := ids.New("air")
 	now := nowMillis()
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,client_request_id,created_at,completed_at) VALUES (?,?,'USER',?,'PENDING',?,?,?,0)`), ids.New("aim"), conversation.ID, input.Message, input.ClientRequestID, now); err != nil {
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,client_request_id,created_at,completed_at) VALUES (?,?,'USER',?,'PENDING',?,?,0)`), ids.New("aim"), conversation.ID, input.Message, input.ClientRequestID, now); err != nil {
 		return AIStartResult{}, normalizeDBError(err)
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_requests (id,user_id,conversation_id,client_request_id,provider_kind,model,status,created_at) VALUES (?,?,?,?,?,?, 'PENDING', ?)`), requestID, userID, conversation.ID, input.ClientRequestID, config.ProviderKind, config.Model, now); err != nil {
@@ -329,7 +329,7 @@ func (s *Store) FinishAIRequest(ctx context.Context, requestID, response, status
 		return err
 	}
 	if response != "" {
-		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,created_at,completed_at) VALUES (?,?,'ASSISTANT',?,'COMPLETE',?,?,?)`), ids.New("aim"), req.ConversationID, response, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,created_at,completed_at) VALUES (?,?,'ASSISTANT',?,'COMPLETE',?,?)`), ids.New("aim"), req.ConversationID, response, now, now); err != nil {
 			return err
 		}
 	}
