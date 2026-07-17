@@ -52,9 +52,12 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) cleanupAuditLogs(ctx context.Context) {
-	raw, err := w.store.Setting(ctx, "audit.retention_days", "90")
+	raw, err := w.store.Setting(ctx, "audit.retention_days", "")
 	if err != nil {
 		w.log.Warn("read audit retention setting", "error", err)
+		return
+	}
+	if strings.TrimSpace(raw) == "" {
 		return
 	}
 	days, err := strconv.Atoi(strings.TrimSpace(raw))

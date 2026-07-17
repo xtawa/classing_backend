@@ -47,7 +47,7 @@ Authorization: Bearer <accessToken>
 - `POST /api/v1/admin/briefing-jobs/{id}/retry`
 - `GET /api/v1/admin/audit-logs?limit=&offset=`：分页读取审计日志，响应包含 `auditLogs` 与 `total`。
 - `GET /api/v1/admin/settings`
-- `PUT /api/v1/admin/settings`：`audit.retention_days` 可设置为 1–3650，保存后立即清理一次，后台任务继续自动清理。
+- `PUT /api/v1/admin/settings`：`audit.retention_days` 可设置为 1–3650；未配置时不清理，保存后立即清理一次，后台任务继续自动清理。
 
 ## 健康检查
 
