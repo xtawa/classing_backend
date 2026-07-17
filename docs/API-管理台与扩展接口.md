@@ -33,6 +33,7 @@ Authorization: Bearer <accessToken>
 - `GET /api/v1/admin/dashboard`
 - `GET /api/v1/admin/users`
 - `PATCH /api/v1/admin/users/{id}`
+- `DELETE /api/v1/admin/users/{id}`：脱敏删除用户、撤销全部会话并释放原邮箱/用户名；禁止管理员删除自己。
 - `POST /api/v1/admin/redeem-codes/generate`
 - `GET /api/v1/admin/redeem-codes/query`
 - `POST /api/v1/admin/redeem-codes/revoke`
@@ -44,9 +45,9 @@ Authorization: Bearer <accessToken>
 - `DELETE /api/v1/admin/mailboxes/{id}`
 - `GET /api/v1/admin/briefing-jobs`
 - `POST /api/v1/admin/briefing-jobs/{id}/retry`
-- `GET /api/v1/admin/audit-logs`
+- `GET /api/v1/admin/audit-logs?limit=&offset=`：分页读取审计日志，响应包含 `auditLogs` 与 `total`。
 - `GET /api/v1/admin/settings`
-- `PUT /api/v1/admin/settings`
+- `PUT /api/v1/admin/settings`：`audit.retention_days` 可设置为 1–3650，保存后立即清理一次，后台任务继续自动清理。
 
 ## 健康检查
 

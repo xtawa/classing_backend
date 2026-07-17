@@ -339,6 +339,17 @@ func (s *Store) UpdatePassword(ctx context.Context, id, hash string) error {
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, userID string, audit AuditContext) error {
+	return s.deleteAccount(ctx, userID, "", false, audit)
+}
+
+func (s *Store) AdminDeleteUser(ctx context.Context, actorID, userID string, audit AuditContext) error {
+	if strings.TrimSpace(actorID) == "" || actorID == userID {
+		return ErrForbidden
+	}
+	return s.deleteAccount(ctx, userID, actorID, true, audit)
+}
+
+func (s *Store) deleteAccount(ctx context.Context, userID, actorID string, allowManagedStatuses bool, audit AuditContext) error {
 	if strings.TrimSpace(userID) == "" {
 		return ErrInvalid
 	}
@@ -355,7 +366,11 @@ func (s *Store) DeleteAccount(ctx context.Context, userID string, audit AuditCon
 	if err := tx.GetContext(ctx, &current, s.rebind(`SELECT * FROM users WHERE id = ?`)+lockSuffix, userID); err != nil {
 		return normalizeDBError(err)
 	}
-	if current.Status != model.StatusActive {
+	managedStatus := current.Status == model.StatusDisabled || current.Status == model.StatusPending
+	if current.Status != model.StatusActive && !(allowManagedStatuses && managedStatus) {
+		return ErrForbidden
+	}
+	if actorID != "" && current.ID == actorID {
 		return ErrForbidden
 	}
 	if current.Role == model.RoleAdmin {
@@ -384,7 +399,7 @@ func (s *Store) DeleteAccount(ctx context.Context, userID string, audit AuditCon
 	}
 	deletedUsername := "deleted_" + suffix
 	deletedEmail := "deleted+" + current.ID + "@deleted.classing.local"
-	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET username = ?, email = ?, password_hash = '', status = ?, email_verified = 0, auth_epoch = ?, updated_at = ? WHERE id = ? AND status = ?`), deletedUsername, deletedEmail, model.StatusDeleted, now, now, userID, model.StatusActive)
+	result, err := tx.ExecContext(ctx, s.rebind(`UPDATE users SET username = ?, email = ?, password_hash = '', status = ?, email_verified = 0, auth_epoch = ?, updated_at = ? WHERE id = ? AND status = ?`), deletedUsername, deletedEmail, model.StatusDeleted, now, now, userID, current.Status)
 	if err != nil {
 		return normalizeDBError(err)
 	}
@@ -395,6 +410,9 @@ func (s *Store) DeleteAccount(ctx context.Context, userID string, audit AuditCon
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at = 0`), now, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE memberships SET tier = 'FREE', expires_at = 0, updated_at = ?, source = 'ACCOUNT_DELETE' WHERE user_id = ?`), now, userID); err != nil {
 		return err
 	}
 	audit.TargetID = userID
@@ -579,10 +597,11 @@ func (s *Store) ConsumeResetToken(ctx context.Context, tokenHash, newPasswordHas
 }
 
 func (s *Store) ListUsers(ctx context.Context, limit, offset int, query string) ([]model.User, int, error) {
-	where := ""
-	args := []any{}
+	where := ` WHERE status <> ?`
+	args := []any{model.StatusDeleted}
 	if strings.TrimSpace(query) != "" {
 		where = ` WHERE lower(username) LIKE ? OR lower(email) LIKE ?`
+		args = args[:0]
 		term := "%" + strings.ToLower(strings.TrimSpace(query)) + "%"
 		args = append(args, term, term)
 	}

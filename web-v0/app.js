@@ -13,6 +13,10 @@ const state = {
   settingsFormDirty: false,
   settingsDirtyFields: new Set(),
   settingsRendering: false,
+  scheduleFormDirty: false,
+  scheduleRendering: false,
+  auditPage: 0,
+  auditPageSize: 25,
 };
 
 const authShell = document.getElementById("authShell");
@@ -180,6 +184,48 @@ async function refreshSession() {
 
 function escapeHTML(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+}
+
+function renderMarkdownInline(value) {
+  const code = [];
+  let rendered = String(value ?? "").replace(/`([^`]+)`/g, (_, content) => {
+    const token = `\u0000CODE${code.length}\u0000`; code.push(`<code>${escapeHTML(content)}</code>`); return token;
+  });
+  rendered = escapeHTML(rendered)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_])_([^_]+)_/g, "$1<em>$2</em>");
+  code.forEach((html, index) => { rendered = rendered.replace(`\u0000CODE${index}\u0000`, html); });
+  return rendered;
+}
+
+function renderMarkdown(value) {
+  const lines = String(value ?? "").replace(/\r/g, "").split("\n");
+  const output = []; let paragraph = []; let listType = ""; let listItems = []; let inCode = false; let codeLanguage = ""; let codeLines = [];
+  const flushParagraph = () => { if (paragraph.length) { output.push(`<p>${paragraph.map(renderMarkdownInline).join("<br>")}</p>`); paragraph = []; } };
+  const flushList = () => { if (listItems.length) { output.push(`<${listType}>${listItems.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join("")}</${listType}>`); listItems = []; listType = ""; } };
+  lines.forEach((line) => {
+    const fence = line.match(/^```\s*([\w+-]*)/);
+    if (fence) {
+      if (inCode) { output.push(`<pre><code${codeLanguage ? ` data-language="${escapeHTML(codeLanguage)}"` : ""}>${escapeHTML(codeLines.join("\n"))}</code></pre>`); codeLines = []; codeLanguage = ""; inCode = false; }
+      else { flushParagraph(); flushList(); inCode = true; codeLanguage = fence[1] || ""; }
+      return;
+    }
+    if (inCode) { codeLines.push(line); return; }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/); const unordered = line.match(/^\s*[-*+]\s+(.+)$/); const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/); const quote = line.match(/^>\s?(.*)$/);
+    if (heading) { flushParagraph(); flushList(); const level = heading[1].length; output.push(`<h${level}>${renderMarkdownInline(heading[2])}</h${level}>`); }
+    else if (unordered || ordered) { flushParagraph(); const nextType = unordered ? "ul" : "ol"; if (listType && listType !== nextType) flushList(); listType = nextType; listItems.push((unordered || ordered)[1]); }
+    else if (quote) { flushParagraph(); flushList(); output.push(`<blockquote>${renderMarkdownInline(quote[1])}</blockquote>`); }
+    else if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { flushParagraph(); flushList(); output.push("<hr>"); }
+    else if (!line.trim()) { flushParagraph(); flushList(); }
+    else paragraph.push(line);
+  });
+  if (inCode) output.push(`<pre><code>${escapeHTML(codeLines.join("\n"))}</code></pre>`);
+  flushParagraph(); flushList();
+  return output.join("");
 }
 
 function formatDate(value, withTime = false) {
@@ -426,7 +472,7 @@ async function renderUsers() {
   content.innerHTML = `<div class="runtime-page">${hero("users", `<div class="hero-stat"><strong>${response.total}</strong><span>账户总数</span></div>`)}
     <section class="runtime-panel"><div class="runtime-panel-header"><h2>用户目录</h2><span class="status-pill">${response.total} 个账户</span></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>用户</th><th>角色</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
-    ${response.users.map((user) => `<tr><td><strong>${escapeHTML(user.username)}</strong><br><small>${escapeHTML(user.email)}</small><br><small>${user.membership?.isMember ? `会员 ${escapeHTML(user.membership.tier)} · ${formatDate(user.membership.expiresAt)}` : "FREE"}</small></td><td><select data-user-role="${user.userId}"><option ${user.role === "USER" ? "selected" : ""}>USER</option><option ${user.role === "ADMIN" ? "selected" : ""}>ADMIN</option></select></td><td><select data-user-status="${user.userId}"><option ${user.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option ${user.status === "DISABLED" ? "selected" : ""}>DISABLED</option></select></td><td>${formatDate(user.createdAt)}</td><td><div class="runtime-actions"><button class="tonal-button" data-save-user="${user.userId}">保存</button>${user.membership?.isMember ? `<button class="danger-button" data-revoke-membership="${user.userId}">吊销会员</button>` : ""}</div></td></tr>`).join("")}
+    ${response.users.map((user) => `<tr><td><strong>${escapeHTML(user.username)}</strong><br><small>${escapeHTML(user.email)}</small><br><small>${user.emailVerified ? "邮箱已验证" : "邮箱未验证"} · ${user.membership?.isMember ? `会员 ${escapeHTML(user.membership.tier)} · ${formatDate(user.membership.expiresAt)}` : "FREE"}</small></td><td><select data-user-role="${user.userId}"><option ${user.role === "USER" ? "selected" : ""}>USER</option><option ${user.role === "ADMIN" ? "selected" : ""}>ADMIN</option></select></td><td><select data-user-status="${user.userId}"><option ${user.status === "ACTIVE" ? "selected" : ""}>ACTIVE</option><option ${user.status === "DISABLED" ? "selected" : ""}>DISABLED</option><option ${user.status === "PENDING" ? "selected" : ""} disabled>PENDING</option></select></td><td>${formatDate(user.createdAt)}</td><td><div class="runtime-actions">${user.status !== "PENDING" ? `<button class="tonal-button" data-save-user="${user.userId}">保存</button>` : ""}${user.membership?.isMember ? `<button class="danger-button" data-revoke-membership="${user.userId}">吊销会员</button>` : ""}${user.userId !== state.account.userId ? `<button class="danger-button" data-delete-user="${user.userId}" data-delete-user-label="${escapeHTML(user.email)}">删除用户</button>` : ""}</div></td></tr>`).join("")}
     </tbody></table></div></section></div>`;
   document.querySelectorAll("[data-save-user]").forEach((button) => button.addEventListener("click", async () => {
     const id = button.dataset.saveUser;
@@ -439,26 +485,115 @@ async function renderUsers() {
     if (!confirm("确定吊销该用户的会员权益？")) return;
     try { await api("/api/v1/admin/membership/revoke", { method: "POST", body: JSON.stringify({ userId: button.dataset.revokeMembership }) }); toast("会员权益已吊销"); renderUsers(); } catch (error) { toast(error.message, "error"); }
   }));
+  document.querySelectorAll("[data-delete-user]").forEach((button) => button.addEventListener("click", async () => {
+    const label = button.dataset.deleteUserLabel || button.dataset.deleteUser;
+    if (!confirm(`确定删除用户 ${label}？账号将被脱敏，所有会话立即失效，原邮箱和用户名可重新注册。`)) return;
+    try {
+      await api(`/api/v1/admin/users/${button.dataset.deleteUser}`, { method: "DELETE" });
+      toast("用户已删除，原身份标识已释放");
+      renderUsers();
+    } catch (error) { toast(error.message, "error"); }
+  }));
 }
 
 async function renderSchedules() {
-  const response = await api("/api/v1/timetables?limit=100");
-  setFab("新建课表");
-  content.innerHTML = `<div class="runtime-page">${hero("schedules", `<div class="hero-stat"><strong>${response.total}</strong><span>课表项目</span></div>`)}
-    <div class="runtime-grid"><section class="runtime-panel half"><div class="runtime-panel-header"><h2>新建课表</h2></div>
-      <form class="runtime-form" id="createTimetableForm"><label class="form-field full"><span>项目名称</span><input name="name" required maxlength="100" placeholder="例如：2026 秋季学期"></label><label class="form-field"><span>时区</span><input name="timezone" value="Asia/Shanghai" required></label><label class="form-field"><span>教学周数</span><input name="weekCount" type="number" value="20" min="1" max="60"></label><label class="form-field full"><span>学期开始日期</span><input name="semesterStart" type="date"></label><div class="runtime-actions full"><button class="primary-button" type="submit">创建项目</button></div></form>
-    </section><section class="runtime-panel half"><div class="runtime-panel-header"><h2>项目列表</h2><span class="status-pill">${response.total}</span></div>
-      ${response.projects.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>名称</th><th>版本</th><th>更新</th><th>操作</th></tr></thead><tbody>${response.projects.map((item) => `<tr><td><strong>${escapeHTML(item.name)}</strong><br><small>${escapeHTML(item.timezone)}</small></td><td>v${item.version}</td><td>${formatDate(item.updatedAt, true)}</td><td><button class="danger-button" data-delete-project="${item.projectId}">删除</button></td></tr>`).join("")}</tbody></table></div>` : emptyState("还没有课表", "创建第一份课表后即可同步客户端数据。")}
-    </section></div></div>`;
-  document.getElementById("createTimetableForm").addEventListener("submit", async (event) => {
-    event.preventDefault(); const data = new FormData(event.currentTarget);
-    try { await api("/api/v1/timetables", { method: "POST", body: JSON.stringify({ name: data.get("name"), timezone: data.get("timezone"), semesterStart: data.get("semesterStart"), weekCount: Number(data.get("weekCount")), document: { lessons: [], exceptions: [] } }) }); toast("课表项目已创建"); renderSchedules(); }
-    catch (error) { toast(error.message, "error"); }
+  if (state.scheduleRendering) return;
+  state.scheduleRendering = true;
+  try {
+    const [projects, membership] = await Promise.all([api("/api/v1/timetables?limit=100"), api("/api/v1/membership/status")]);
+    let cloud = null; let cloudError = "";
+    try { cloud = await fetchCloudDocument(true, state.cloudEventVersion); } catch (error) { cloudError = error.message; }
+    const lessons = cloud ? readCloudDomainRecords(cloud.document, "timetable.lessons") : [];
+    const canSyncTimetable = Boolean(cloud && membership.membership?.isMember);
+    setFab("添加课程");
+    content.innerHTML = `<div class="runtime-page">${hero("schedules", `<div class="hero-stat"><strong>${lessons.length}</strong><span>手机课程</span></div>`)}
+      <div class="runtime-grid">
+        <section class="runtime-panel full"><div class="runtime-panel-header"><h2>手机课表 · 官方云实时同步</h2><span class="status-pill" id="scheduleSyncStatus">${canSyncTimetable ? "实时连接" : cloud ? "需要有效会员" : "云端不可用"}</span></div>
+          ${cloud ? `<form class="runtime-form" id="mobileLessonForm"><input type="hidden" name="id"><label class="form-field full"><span>课程名称</span><input name="title" required maxlength="100" ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>教师</span><input name="teacher" maxlength="100" ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>地点</span><input name="location" maxlength="160" ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>星期</span><select name="dayOfWeek" ${canSyncTimetable ? "" : "disabled"}>${["一", "二", "三", "四", "五", "六", "日"].map((label, index) => `<option value="${index + 1}">周${label}</option>`).join("")}</select></label><label class="form-field"><span>单双周</span><select name="weekParity" ${canSyncTimetable ? "" : "disabled"}><option value="ALL">每周</option><option value="ODD">单周</option><option value="EVEN">双周</option></select></label><label class="form-field"><span>开始时间</span><input name="startTime" type="time" value="08:00" required ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>结束时间</span><input name="endTime" type="time" value="09:40" required ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>开始周</span><input name="startWeek" type="number" min="1" max="30" value="1" required ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field"><span>结束周</span><input name="endWeek" type="number" min="1" max="30" value="20" required ${canSyncTimetable ? "" : "disabled"}></label><label class="form-field full"><span>备注</span><textarea name="note" maxlength="1000" ${canSyncTimetable ? "" : "disabled"}></textarea></label><div class="runtime-actions full"><button class="primary-button" ${canSyncTimetable ? "" : "disabled"}>保存并同步</button><button class="tonal-button" id="cancelLessonEdit" type="button">清空</button><small>${canSyncTimetable ? "保存后会通过官方云事件立即通知 Mobile 合并。" : "课表跨端同步需要有效会员；免费账户仍可同步设置。"}</small></div></form>` : `<div class="empty-state"><strong>无法读取官方云课表</strong><span>${escapeHTML(cloudError)}</span></div>`}
+        </section>
+        <section class="runtime-panel full"><div class="runtime-panel-header"><h2>当前手机课程</h2><span class="status-pill">${lessons.length} 门</span></div>${lessons.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>课程</th><th>时间</th><th>周次</th><th>操作</th></tr></thead><tbody>${lessons.map((lesson) => `<tr><td><strong>${escapeHTML(lesson.title)}</strong><br><small>${escapeHTML([lesson.teacher, lesson.location].filter(Boolean).join(" · ") || "未填写教师和地点")}</small></td><td>周${["一", "二", "三", "四", "五", "六", "日"][Number(lesson.dayOfWeek || 1) - 1]}<br><small>${minuteToTime(lesson.startMinute)}–${minuteToTime(lesson.endMinute)}</small></td><td>${lesson.startWeek || 1}–${lesson.endWeek || 30} 周<br><small>${lesson.weekParity === "ODD" ? "单周" : lesson.weekParity === "EVEN" ? "双周" : "每周"}</small></td><td><div class="runtime-actions"><button class="tonal-button" data-edit-lesson="${escapeHTML(lesson.id)}" ${canSyncTimetable ? "" : "disabled"}>编辑</button><button class="danger-button" data-delete-lesson="${escapeHTML(lesson.id)}" ${canSyncTimetable ? "" : "disabled"}>删除</button></div></td></tr>`).join("")}</tbody></table></div>` : emptyState("手机课表暂无课程", "在这里添加课程后，Mobile 会实时收到并合并。")}</section>
+        <section class="runtime-panel full"><div class="runtime-panel-header"><h2>Ask AI 课表项目</h2><span class="status-pill">${projects.total}</span></div>${projects.projects.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>名称</th><th>版本</th><th>更新</th></tr></thead><tbody>${projects.projects.map((item) => `<tr><td><strong>${escapeHTML(item.name)}</strong><br><small>${escapeHTML(item.timezone)}</small></td><td>v${item.version}</td><td>${formatDate(item.updatedAt, true)}</td></tr>`).join("")}</tbody></table></div>` : `<p class="form-hint">Ask AI 会自动使用上方手机课表；旧版独立项目仍保留兼容。</p>`}</section>
+      </div></div>`;
+    const form = document.getElementById("mobileLessonForm");
+    state.scheduleFormDirty = false;
+    form?.addEventListener("input", () => { state.scheduleFormDirty = true; });
+    form?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.currentTarget));
+      const startMinute = timeToMinute(data.startTime); const endMinute = timeToMinute(data.endTime);
+      const startWeek = Number(data.startWeek); const endWeek = Number(data.endWeek);
+      if (endMinute <= startMinute) { toast("结束时间必须晚于开始时间", "error"); return; }
+      if (endWeek < startWeek) { toast("结束周不能早于开始周", "error"); return; }
+      const id = data.id || `lesson-${crypto.randomUUID()}`;
+      const payload = { id, title: data.title.trim(), teacher: data.teacher.trim(), location: data.location.trim(), note: data.note.trim(), dayOfWeek: Number(data.dayOfWeek), startMinute, endMinute, startWeek, endWeek, weekParity: data.weekParity };
+      try { await mutateCloudRecord("timetable.lessons", id, payload, false); state.scheduleFormDirty = false; toast("课程已同步到手机课表"); await renderSchedules(); } catch (error) { toast(error.message, "error"); }
+    });
+    document.getElementById("cancelLessonEdit")?.addEventListener("click", () => { form.reset(); form.elements.id.value = ""; state.scheduleFormDirty = false; });
+    document.querySelectorAll("[data-edit-lesson]").forEach((button) => button.addEventListener("click", () => {
+      const lesson = lessons.find((item) => item.id === button.dataset.editLesson); if (!lesson || !form) return;
+      Object.entries({ id: lesson.id, title: lesson.title, teacher: lesson.teacher || "", location: lesson.location || "", note: lesson.note || "", dayOfWeek: lesson.dayOfWeek || 1, startTime: minuteToTime(lesson.startMinute), endTime: minuteToTime(lesson.endMinute), startWeek: lesson.startWeek || 1, endWeek: lesson.endWeek || 30, weekParity: lesson.weekParity || "ALL" }).forEach(([key, value]) => { if (form.elements[key]) form.elements[key].value = value; });
+      state.scheduleFormDirty = true; form.scrollIntoView({ behavior: "smooth", block: "start" });
+    }));
+    document.querySelectorAll("[data-delete-lesson]").forEach((button) => button.addEventListener("click", async () => {
+      const lesson = lessons.find((item) => item.id === button.dataset.deleteLesson); if (!lesson || !confirm(`确定删除课程“${lesson.title}”？Mobile 会实时收到删除。`)) return;
+      try { await mutateCloudRecord("timetable.lessons", lesson.id, lesson, true); toast("课程已从手机课表删除"); await renderSchedules(); } catch (error) { toast(error.message, "error"); }
+    }));
+  } finally {
+    state.scheduleRendering = false;
+  }
+}
+
+function readCloudDomainRecords(document, domain) {
+  const winners = new Map();
+  const records = Array.isArray(document?.records?.[domain]) ? document.records[domain] : [];
+  records.forEach((record) => {
+    if (!record?.id) return;
+    const current = winners.get(record.id);
+    if (!current || compareLogicalVersion(record.version, current.version) > 0) winners.set(record.id, record);
   });
-  document.querySelectorAll("[data-delete-project]").forEach((button) => button.addEventListener("click", async () => {
-    if (!confirm("确定删除该课表项目？此操作不可撤销。")) return;
-    try { await api(`/api/v1/timetables/${button.dataset.deleteProject}`, { method: "DELETE" }); toast("课表已删除"); renderSchedules(); } catch (error) { toast(error.message, "error"); }
-  }));
+  return Array.from(winners.values()).filter((record) => !record.deletedAt && record.payload).map((record) => {
+    try { return { ...JSON.parse(record.payload), id: record.id }; } catch { return null; }
+  }).filter(Boolean).sort((a, b) => Number(a.dayOfWeek) - Number(b.dayOfWeek) || Number(a.startMinute) - Number(b.startMinute) || String(a.title).localeCompare(String(b.title), "zh-CN"));
+}
+
+function compareLogicalVersion(left = {}, right = {}) {
+  const counter = Number(left.counter || 0) - Number(right.counter || 0);
+  return counter || String(left.deviceId || "").localeCompare(String(right.deviceId || ""));
+}
+
+function timeToMinute(value) {
+  const [hour, minute] = String(value || "00:00").split(":").map(Number);
+  return Math.max(0, Math.min(1439, hour * 60 + minute));
+}
+
+function minuteToTime(value) {
+  const minute = Math.max(0, Math.min(1439, Number(value || 0)));
+  return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+}
+
+async function mutateCloudRecord(domain, recordId, payload, deleted, attempt = 0) {
+  const cloud = await fetchCloudDocument();
+  const document = JSON.parse(JSON.stringify(cloud.document || {}));
+  const now = Date.now(); const deviceId = browserDeviceId();
+  document.format = "classing_cloud_sync_v2"; document.records ||= {}; document.devices = Array.isArray(document.devices) ? document.devices : []; document.changes = Array.isArray(document.changes) ? document.changes : [];
+  const records = Array.isArray(document.records[domain]) ? document.records[domain] : [];
+  const existing = records.filter((item) => item.id === recordId).sort((a, b) => compareLogicalVersion(b.version, a.version))[0];
+  const allCounters = Object.values(document.records).flatMap((items) => Array.isArray(items) ? items : []).map((item) => Number(item.version?.counter || 0));
+  const device = document.devices.find((item) => item.deviceId === deviceId) || { deviceId, lastCounter: 0, lastChangedAt: 0 };
+  const counter = Math.max(Number(device.lastCounter || 0), ...document.devices.map((item) => Number(item.lastCounter || 0)), ...allCounters, 0) + 1;
+  const version = { counter, deviceId, changedAt: now };
+  const record = { id: recordId, payload: JSON.stringify(payload || (existing?.payload ? JSON.parse(existing.payload) : {})), version, deletedAt: deleted ? now : null, recoverableUntil: deleted ? now + 30 * 24 * 60 * 60 * 1000 : null };
+  document.records[domain] = records.filter((item) => item.id !== recordId).concat(record);
+  device.lastCounter = counter; device.lastChangedAt = now;
+  document.devices = document.devices.filter((item) => item.deviceId !== deviceId).concat(device).sort((a, b) => Number(b.lastChangedAt || 0) - Number(a.lastChangedAt || 0)).slice(0, 64);
+  document.changes.unshift({ id: `chg-web-${crypto.randomUUID()}`, domain, recordId, action: deleted ? "deleted" : existing ? "updated" : "created", version, occurredAt: now, detail: "web timetable editor" });
+  document.changes = document.changes.slice(0, 100); document.updatedAt = now;
+  const response = await safeFetch("/api/v1/cloud/official/document", { method: "PUT", headers: { Authorization: `Bearer ${state.session.accessToken}`, "Content-Type": "application/json", "If-Match": cloud.etag, "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(document) });
+  if (response.status === 401 && attempt < 1 && await refreshSession()) return mutateCloudRecord(domain, recordId, payload, deleted, attempt + 1);
+  if (response.status === 412 && attempt < 3) { await sleep(150 * (attempt + 1)); return mutateCloudRecord(domain, recordId, payload, deleted, attempt + 1); }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) { const error = new Error(body.message || `HTTP ${response.status}`); error.status = response.status; error.code = body.code; throw error; }
+  saveCloudCursor(Number(body.version || 0)); return body;
 }
 
 async function renderMembership() {
@@ -497,15 +632,15 @@ async function renderAskAI() {
 async function loadAIMessages(conversationId) {
   const response = await api(`/api/v1/ai/conversations/${conversationId}/messages`);
   const target = document.getElementById("aiMessages");
-  target.innerHTML = response.messages.map((item) => `<article class="ai-message ${item.role === "USER" ? "user" : "assistant"}"><strong>${item.role === "USER" ? "你" : "Ask AI"}</strong><p>${escapeHTML(item.content)}</p></article>`).join("") || target.innerHTML;
+  target.innerHTML = response.messages.map((item) => `<article class="ai-message ${item.role === "USER" ? "user" : "assistant"}"><strong>${item.role === "USER" ? "你" : "Ask AI"}</strong><div class="markdown-body">${item.role === "USER" ? `<p>${escapeHTML(item.content)}</p>` : renderMarkdown(item.content)}</div></article>`).join("") || target.innerHTML;
   target.scrollTop = target.scrollHeight;
 }
 
 async function sendAIMessage(message, projectId) {
   const target = document.getElementById("aiMessages");
   const formButton = document.querySelector("#aiChatForm button"); formButton.disabled = true;
-  target.insertAdjacentHTML("beforeend", `<article class="ai-message user"><strong>你</strong><p>${escapeHTML(message)}</p></article><article class="ai-message assistant" id="aiStreaming"><strong>Ask AI</strong><p></p></article>`);
-  const stream = document.querySelector("#aiStreaming p");
+  target.insertAdjacentHTML("beforeend", `<article class="ai-message user"><strong>你</strong><div class="markdown-body"><p>${escapeHTML(message)}</p></div></article><article class="ai-message assistant" id="aiStreaming"><strong>Ask AI</strong><div class="markdown-body"></div></article>`);
+  const stream = document.querySelector("#aiStreaming .markdown-body"); let streamedMarkdown = "";
   try {
     const payload = { conversationId: state.aiConversationId || undefined, clientRequestId: crypto.randomUUID(), message };
     if (!state.aiConversationId) { payload.timetableSnapshot = await loadAITimetableSnapshot(projectId); payload.sourceProjectId = projectId; }
@@ -513,8 +648,8 @@ async function sendAIMessage(message, projectId) {
     const response = await safeFetch("/api/v1/ai/chat", { method: "POST", headers, body: JSON.stringify(payload) });
     if (!response.ok || !response.body) { const error = await response.json().catch(() => ({})); throw new Error(error.message || "Ask AI 暂时不可用"); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = ""; let event = "";
-    while (true) { const { value, done } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true }); const lines = pending.split("\n"); pending = lines.pop(); for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); if (line.startsWith("data:")) { const data = JSON.parse(line.slice(5)); if (event === "conversation") state.aiConversationId = data.conversationId; if (event === "delta") stream.textContent += data.text; if (event === "error") throw new Error(data.message || data.code); event = ""; } } }
-  } catch (error) { stream.textContent = `请求失败：${error.message}`; toast(error.message, "error"); }
+    while (true) { const { value, done } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true }); const lines = pending.split("\n"); pending = lines.pop(); for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); if (line.startsWith("data:")) { const data = JSON.parse(line.slice(5)); if (event === "conversation") state.aiConversationId = data.conversationId; if (event === "delta") { streamedMarkdown += data.text; stream.innerHTML = renderMarkdown(streamedMarkdown); } if (event === "error") throw new Error(data.message || data.code); event = ""; } } }
+  } catch (error) { stream.innerHTML = `<p>${escapeHTML(`请求失败：${error.message}`)}</p>`; toast(error.message, "error"); }
   finally { formButton.disabled = false; target.scrollTop = target.scrollHeight; }
 }
 
@@ -699,8 +834,18 @@ async function renderMail() {
 }
 
 async function renderAudit() {
-  const response = await api("/api/v1/admin/audit-logs?limit=100"); setFab("刷新日志");
-  content.innerHTML = `<div class="runtime-page">${hero("audit", `<div class="hero-stat"><strong>${response.total}</strong><span>审计事件</span></div>`)}<section class="runtime-panel">${auditTable(response.auditLogs)}</section></div>`;
+  const offset = state.auditPage * state.auditPageSize;
+  const [response, settings] = await Promise.all([api(`/api/v1/admin/audit-logs?limit=${state.auditPageSize}&offset=${offset}`), api("/api/v1/admin/settings")]);
+  const pageCount = Math.max(1, Math.ceil(response.total / state.auditPageSize));
+  if (state.auditPage >= pageCount) { state.auditPage = pageCount - 1; return renderAudit(); }
+  setFab("刷新日志");
+  content.innerHTML = `<div class="runtime-page">${hero("audit", `<div class="hero-stat"><strong>${response.total}</strong><span>审计事件</span></div>`)}<div class="runtime-grid"><section class="runtime-panel full"><div class="runtime-panel-header"><h2>保留策略</h2><span class="status-pill">自动清理</span></div><form class="runtime-form" id="auditRetentionForm"><label class="form-field"><span>保留天数</span><input name="retentionDays" type="number" min="1" max="3650" value="${Number(settings.settings["audit.retention_days"] || 90)}" required></label><div class="runtime-actions"><button class="primary-button">保存策略</button><small>超过该天数的日志由后台任务自动清除，保存后也会立即执行一次。</small></div></form></section><section class="runtime-panel full"><div class="runtime-panel-header"><h2>审计记录</h2><span class="status-pill">第 ${state.auditPage + 1} / ${pageCount} 页</span></div>${auditTable(response.auditLogs)}<div class="pagination"><button class="tonal-button" id="auditPrevious" ${state.auditPage <= 0 ? "disabled" : ""}>上一页</button><span>第 ${state.auditPage + 1} 页，共 ${pageCount} 页</span><button class="tonal-button" id="auditNext" ${state.auditPage >= pageCount - 1 ? "disabled" : ""}>下一页</button></div></section></div></div>`;
+  document.getElementById("auditPrevious").addEventListener("click", () => { state.auditPage = Math.max(0, state.auditPage - 1); renderAudit(); });
+  document.getElementById("auditNext").addEventListener("click", () => { state.auditPage = Math.min(pageCount - 1, state.auditPage + 1); renderAudit(); });
+  document.getElementById("auditRetentionForm").addEventListener("submit", async (event) => {
+    event.preventDefault(); const days = Number(new FormData(event.currentTarget).get("retentionDays"));
+    try { await api("/api/v1/admin/settings", { method: "PUT", body: JSON.stringify({ settings: { "audit.retention_days": String(days) } }) }); state.auditPage = 0; toast("审计日志保留策略已保存并执行"); renderAudit(); } catch (error) { toast(error.message, "error"); }
+  });
 }
 
 function auditTable(items) {
@@ -816,6 +961,15 @@ async function applyCloudEventBlock(block) {
   const version = Number(payload.version ?? eventId);
   if (!Number.isSafeInteger(version) || version <= state.cloudEventVersion) return;
   saveCloudCursor(version);
+  if (state.view === "schedules" && !state.scheduleRendering) {
+    if (state.scheduleFormDirty) {
+      const status = document.getElementById("scheduleSyncStatus");
+      if (status) status.textContent = "云端课表已更新，保存时将自动合并";
+    } else {
+      await renderSchedules();
+    }
+    return;
+  }
   if (state.view !== "settings" || state.settingsRendering) return;
   if (state.settingsFormDirty) {
     const status = document.querySelector("#clientSettingsForm")?.closest(".runtime-panel")?.querySelector(".status-pill");

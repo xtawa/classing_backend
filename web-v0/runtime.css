@@ -88,6 +88,25 @@
 .toast { max-width: 360px; padding: 14px 18px; color: var(--md-on-surface); background: var(--md-surface-container-highest); border-radius: 16px; box-shadow: var(--shadow); animation: runtime-toast 220ms var(--ease); }
 .toast.error { color: #fff; background: var(--md-error); }
 .code-output { padding: 16px; overflow: auto; color: var(--md-on-primary-container); background: var(--md-primary-container); border-radius: 18px; font: 12px/1.8 "Cascadia Code", monospace; white-space: pre-wrap; }
+.pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 20px; color: var(--md-on-surface-variant); font-size: 12px; }
+.tonal-button:disabled, .danger-button:disabled { opacity: .45; cursor: not-allowed; }
+.ai-message-list { max-height: 620px; display: grid; gap: 12px; overflow: auto; margin: 16px 0; }
+.ai-message { display: grid; gap: 8px; padding: 16px; border-radius: 20px; background: var(--md-surface-container); }
+.ai-message.user { margin-left: min(14%, 72px); background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.ai-message.assistant { margin-right: min(8%, 42px); }
+.markdown-body { min-width: 0; overflow-wrap: anywhere; line-height: 1.72; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { margin: 1.1em 0 .45em; line-height: 1.25; }
+.markdown-body h1 { font-size: 1.55em; } .markdown-body h2 { font-size: 1.35em; } .markdown-body h3 { font-size: 1.18em; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.5em; }
+.markdown-body li + li { margin-top: .35em; }
+.markdown-body blockquote { margin: 12px 0; padding: 8px 14px; color: var(--md-on-surface-variant); border-left: 4px solid var(--md-primary); background: var(--md-surface-container-high); border-radius: 0 12px 12px 0; }
+.markdown-body code { padding: .15em .42em; background: var(--md-surface-container-highest); border-radius: 6px; font: .9em/1.5 "Cascadia Code", monospace; }
+.markdown-body pre { max-width: 100%; overflow: auto; padding: 14px; background: var(--md-inverse-surface); color: var(--md-inverse-on-surface); border-radius: 14px; }
+.markdown-body pre code { padding: 0; color: inherit; background: transparent; }
+.markdown-body a { color: var(--md-primary); font-weight: 650; }
+.markdown-body hr { border: 0; border-top: 1px solid var(--md-outline-variant); }
 @keyframes runtime-spin { to { transform: rotate(360deg); } }
 @keyframes runtime-toast { from { opacity: 0; transform: translateY(-8px); } }
 

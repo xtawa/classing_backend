@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,22 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	s.refreshReplays.invalidateUser(user.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"user": accountPayload(user)})
+}
+
+func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	targetID := strings.TrimSpace(r.PathValue("id"))
+	actorID := principal(r).User.ID
+	if targetID == actorID {
+		writeError(w, r, http.StatusBadRequest, "ADMIN_SELF_DELETE", "administrator cannot delete their own account")
+		return
+	}
+	audit := s.auditContext(r, actorID, "ADMIN_USER_DELETE", "USER", targetID, nil)
+	if err := s.store.AdminDeleteUser(r.Context(), actorID, targetID, audit); err != nil {
+		writeStoreError(w, r, err, "ADMIN_USER")
+		return
+	}
+	s.refreshReplays.invalidateUser(targetID)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "sessionsRevoked": true})
 }
 
 func (s *Server) adminGenerateRedeemCodes(w http.ResponseWriter, r *http.Request) {
@@ -280,10 +297,17 @@ func (s *Server) adminSetSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	allowed := map[string]bool{"registration.enabled": true, "briefing.enabled": true, "cloud.max_document_bytes": true, "maintenance.message": true}
+	allowed := map[string]bool{"registration.enabled": true, "briefing.enabled": true, "cloud.max_document_bytes": true, "maintenance.message": true, "audit.retention_days": true}
 	for key := range body.Settings {
 		if !allowed[key] {
 			writeError(w, r, http.StatusBadRequest, "SETTING_NOT_ALLOWED", "one or more settings cannot be changed at runtime")
+			return
+		}
+	}
+	if raw, ok := body.Settings["audit.retention_days"]; ok {
+		days, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || days < 1 || days > 3650 {
+			writeError(w, r, http.StatusBadRequest, "SETTING_INVALID", "audit retention days must be between 1 and 3650")
 			return
 		}
 	}
@@ -292,6 +316,12 @@ func (s *Server) adminSetSettings(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SetSettingsAudited(r.Context(), actorID, body.Settings, audit); err != nil {
 		writeStoreError(w, r, err, "SETTINGS")
 		return
+	}
+	if raw, ok := body.Settings["audit.retention_days"]; ok {
+		days, _ := strconv.Atoi(strings.TrimSpace(raw))
+		if _, err := s.store.CleanupAuditLogs(r.Context(), days); err != nil {
+			s.log.Warn("cleanup audit logs after settings update", "error", err, "retention_days", days, "request_id", requestID(r))
+		}
 	}
 	s.adminListSettings(w, r)
 }

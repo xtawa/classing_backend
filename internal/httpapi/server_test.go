@@ -328,6 +328,52 @@ func TestAccountDeleteSoftDeletesAndRevokesAllSessions(t *testing.T) {
 	}
 }
 
+func TestAdminDeletesPendingUserAndReleasesIdentity(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if _, err := data.BootstrapAdmin(ctx, "admin", "admin@classing.test", "AdminPass123!"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := data.UserByIdentifier(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Environment: "test", JWTSecret: []byte("01234567890123456789012345678901"), AccessTokenTTL: time.Minute, RefreshTokenTTL: time.Hour, EmailVerificationTTL: time.Minute, ExposeVerificationCode: true, MaxCloudDocumentSize: 1024 * 1024}
+	testServer := httptest.NewServer(New(cfg, data, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}, slog.Default()).Handler())
+	defer testServer.Close()
+	client := testClient{base: testServer.URL, client: testServer.Client()}
+
+	status, body := client.request(t, http.MethodPost, "/api/v1/auth/login", "", map[string]any{"identifier": "admin", "password": "AdminPass123!"})
+	if status != http.StatusOK {
+		t.Fatalf("admin login: %d %+v", status, body)
+	}
+	adminAccess := body["session"].(map[string]any)["accessToken"].(string)
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": "pending", "email": "pending@test.local", "password": "PendingPass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("create pending user: %d %+v", status, body)
+	}
+	pending, err := data.UserByIdentifier(ctx, "pending@test.local")
+	if err != nil || pending.Status != model.StatusPending {
+		t.Fatalf("pending user missing: user=%+v err=%v", pending, err)
+	}
+	status, body = client.request(t, http.MethodDelete, "/api/v1/admin/users/"+pending.ID, adminAccess, nil)
+	if status != http.StatusOK || body["success"] != true {
+		t.Fatalf("admin delete pending user: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodPost, "/api/v1/auth/register/email/request", "", map[string]any{"username": "pending", "email": "pending@test.local", "password": "PendingPass123!"})
+	if status != http.StatusAccepted {
+		t.Fatalf("deleted identity was not released: %d %+v", status, body)
+	}
+	status, body = client.request(t, http.MethodDelete, "/api/v1/admin/users/"+admin.ID, adminAccess, nil)
+	if status != http.StatusBadRequest || body["code"] != "ADMIN_SELF_DELETE" {
+		t.Fatalf("admin self-delete not rejected: %d %+v", status, body)
+	}
+}
+
 func TestAccountMembershipAndSessionRevocation(t *testing.T) {
 	ctx := context.Background()
 	data, err := store.Open(ctx, "sqlite", "file:"+t.TempDir()+"/test.db?_pragma=foreign_keys(1)")

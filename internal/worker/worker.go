@@ -34,6 +34,7 @@ func (w *Worker) Run(ctx context.Context) {
 	if err := w.store.CleanupExpiredSecurityData(ctx); err != nil {
 		w.log.Warn("cleanup expired security data", "error", err)
 	}
+	w.cleanupAuditLogs(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,9 +44,31 @@ func (w *Worker) Run(ctx context.Context) {
 			if err := w.store.CleanupExpiredSecurityData(ctx); err != nil {
 				w.log.Warn("cleanup expired security data", "error", err)
 			}
+			w.cleanupAuditLogs(ctx)
 		case <-deliveryTicker.C:
 			w.deliverOne(ctx)
 		}
+	}
+}
+
+func (w *Worker) cleanupAuditLogs(ctx context.Context) {
+	raw, err := w.store.Setting(ctx, "audit.retention_days", "90")
+	if err != nil {
+		w.log.Warn("read audit retention setting", "error", err)
+		return
+	}
+	days, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || days < 1 || days > 3650 {
+		w.log.Warn("invalid audit retention setting", "value", raw)
+		return
+	}
+	deleted, err := w.store.CleanupAuditLogs(ctx, days)
+	if err != nil {
+		w.log.Warn("cleanup audit logs", "error", err)
+		return
+	}
+	if deleted > 0 {
+		w.log.Info("cleaned audit logs", "deleted", deleted, "retention_days", days)
 	}
 }
 

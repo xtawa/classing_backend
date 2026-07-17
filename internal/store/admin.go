@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/xtawa/classing-backend/internal/ids"
@@ -49,7 +50,7 @@ func (s *Store) Dashboard(ctx context.Context) (DashboardStats, error) {
 		query  string
 		args   []any
 	}{
-		{&stats.Users, `SELECT COUNT(*) FROM users`, nil},
+		{&stats.Users, s.rebind(`SELECT COUNT(*) FROM users WHERE status <> ?`), []any{model.StatusDeleted}},
 		{&stats.ActiveMembers, s.rebind(`SELECT COUNT(*) FROM memberships WHERE expires_at > ?`), []any{now}},
 		{&stats.TimetableProjects, `SELECT COUNT(*) FROM timetable_projects`, nil},
 		{&stats.PendingJobs, `SELECT COUNT(*) FROM briefing_jobs WHERE status IN ('PENDING', 'RETRY')`, nil},
@@ -100,6 +101,18 @@ func (s *Store) ListAudit(ctx context.Context, limit, offset int) ([]model.Audit
 	items := []model.AuditLog{}
 	err := s.db.SelectContext(ctx, &items, s.rebind(`SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?`), limit, offset)
 	return items, total, err
+}
+
+func (s *Store) CleanupAuditLogs(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays < 1 || retentionDays > 3650 {
+		return 0, ErrInvalid
+	}
+	cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour).UnixMilli()
+	result, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM audit_logs WHERE created_at < ?`), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) ListSettings(ctx context.Context) (map[string]string, error) {

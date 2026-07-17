@@ -115,6 +115,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/admin/dashboard", s.requireAdmin(http.HandlerFunc(s.adminDashboard)))
 	mux.Handle("GET /api/v1/admin/users", s.requireAdmin(http.HandlerFunc(s.adminListUsers)))
 	mux.Handle("PATCH /api/v1/admin/users/{id}", s.requireAdmin(http.HandlerFunc(s.adminUpdateUser)))
+	mux.Handle("DELETE /api/v1/admin/users/{id}", s.requireAdmin(http.HandlerFunc(s.adminDeleteUser)))
 	mux.Handle("POST /api/v1/admin/redeem-codes/generate", s.requireAdmin(http.HandlerFunc(s.adminGenerateRedeemCodes)))
 	mux.Handle("GET /api/v1/admin/redeem-codes/query", s.requireAdmin(http.HandlerFunc(s.adminListRedeemCodes)))
 	mux.Handle("POST /api/v1/admin/redeem-codes/revoke", s.requireAdmin(http.HandlerFunc(s.adminRevokeRedeemCode)))

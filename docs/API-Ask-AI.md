@@ -30,6 +30,8 @@
 
 响应为 `text/event-stream`，事件依次可能为 `conversation`、`usage`、多个 `delta`、`done` 或 `error`。`clientRequestId` 在同一用户内幂等；完成的重复请求会重放已保存回答，不重复计量。
 
+`delta.text` 和已保存的助手消息允许使用 Markdown。Web 与 Mobile 客户端应将助手消息作为富文本安全渲染，不执行原始 HTML；用户消息仍按纯文本显示。
+
 ## 用户接口
 
 - `GET /api/v1/ai/usage/me`：返回当月 `limit`、`used`、`reserved`、`resetAt`。

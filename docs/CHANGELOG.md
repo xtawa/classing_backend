@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-07-17 · Web 课表实时管理、审计保留和富文本问答
+
+### Added
+
+- Web 课表页可直接新增、编辑和删除 Mobile 使用的 `timetable.lessons`，写入沿用官方云 ETag、幂等键、V2 逻辑版本与删除墓碑，并通过 SSE 实时通知 Mobile 合并。
+- 审计日志页支持分页，并可配置 `audit.retention_days`（1–3650 天）；保存后立即清理一次，后台任务持续自动清理。
+- 新增 `DELETE /api/v1/admin/users/{id}`；管理员可删除未验证、已停用或普通用户，服务端脱敏身份、撤销会话并释放原邮箱和用户名，同时禁止管理员删除自己。
+- Web Ask AI 的历史消息与流式回答支持安全 Markdown 富文本渲染。
+
+### Client Impact
+
+- Mobile Ask AI 同步支持标题、列表、引用、代码块、粗体、斜体、删除线和链接样式。
+- Mobile 已有官方云 SSE 控制器会在 Web 保存课程后立即拉取最新文档并应用课表域。
+
 ## 2026-07-17 · Wear 二维码设备登录
 
 ### Added
