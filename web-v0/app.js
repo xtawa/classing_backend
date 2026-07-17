@@ -25,6 +25,7 @@ const content = document.getElementById("content");
 const navItems = Array.from(document.querySelectorAll(".nav-item"));
 const tweaks = document.getElementById("tweaks");
 const tweaksTrigger = document.getElementById("tweaksTrigger");
+const reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)");
 
 const viewCopy = {
   overview: ["运营总览", "OVERVIEW", "一张工作台，看清系统状态", "账户、课表、会员、同步与投递链路会在这里汇总。"],
@@ -241,6 +242,14 @@ function toast(message, type = "success") {
   setTimeout(() => item.remove(), 4200);
 }
 
+function prefersReducedMotion() {
+  return Boolean(reducedMotionQuery?.matches);
+}
+
+function scrollBehavior() {
+  return prefersReducedMotion() ? "auto" : "smooth";
+}
+
 function setLoading() { content.innerHTML = `<div class="loading-state">正在读取服务数据…</div>`; }
 
 function hero(view, extra = "") {
@@ -297,8 +306,8 @@ function bindChrome() {
   navItems.forEach((item) => item.addEventListener("click", () => setView(item.dataset.view)));
   document.getElementById("accountButton").addEventListener("click", () => setView("settings"));
   document.getElementById("logoutButton").addEventListener("click", () => signOut(true));
-  document.getElementById("mobileMenu").addEventListener("click", () => document.body.classList.toggle("nav-open"));
-  document.getElementById("scrim").addEventListener("click", () => document.body.classList.remove("nav-open"));
+  document.getElementById("mobileMenu").addEventListener("click", () => setNavOpen(!document.body.classList.contains("nav-open")));
+  document.getElementById("scrim").addEventListener("click", () => setNavOpen(false));
   tweaksTrigger.addEventListener("click", () => setTweaks(true));
   document.getElementById("closeTweaks").addEventListener("click", () => setTweaks(false));
   document.getElementById("schemeSelect").addEventListener("change", (event) => {
@@ -317,8 +326,16 @@ function bindChrome() {
   document.getElementById("materialFab").addEventListener("click", handleFab);
 }
 
+function setNavOpen(open) {
+  document.body.classList.toggle("nav-open", open);
+  const mobileMenu = document.getElementById("mobileMenu");
+  mobileMenu.setAttribute("aria-expanded", String(open));
+  mobileMenu.setAttribute("aria-label", open ? "关闭导航" : "打开导航");
+}
+
 function setTweaks(open) {
   tweaks.classList.toggle("open", open);
+  tweaks.setAttribute("aria-hidden", String(!open));
   tweaksTrigger.hidden = open;
   tweaksTrigger.setAttribute("aria-expanded", String(open));
 }
@@ -429,9 +446,14 @@ async function signOut(callAPI) {
 async function setView(view) {
   if (!viewCopy[view] || (!isAdmin() && ["overview", "users", "redeem", "mail", "audit", "releases", "aiAdmin"].includes(view))) view = "schedules";
   state.view = view;
-  navItems.forEach((item) => item.classList.toggle("active", item.dataset.view === view));
+  navItems.forEach((item) => {
+    const active = item.dataset.view === view;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
   document.getElementById("viewCrumb").textContent = viewCopy[view][0];
-  document.body.classList.remove("nav-open");
+  setNavOpen(false);
   setLoading();
   try {
     const renderers = { overview: renderOverview, users: renderUsers, schedules: renderSchedules, membership: renderMembership, askAi: renderAskAI, redeem: renderRedeem, briefings: renderBriefings, releases: renderReleases, mail: renderMail, audit: renderAudit, aiAdmin: renderAIAdmin, settings: renderSettings };
@@ -532,7 +554,7 @@ async function renderSchedules() {
     document.querySelectorAll("[data-edit-lesson]").forEach((button) => button.addEventListener("click", () => {
       const lesson = lessons.find((item) => item.id === button.dataset.editLesson); if (!lesson || !form) return;
       Object.entries({ id: lesson.id, title: lesson.title, teacher: lesson.teacher || "", location: lesson.location || "", note: lesson.note || "", dayOfWeek: lesson.dayOfWeek || 1, startTime: minuteToTime(lesson.startMinute), endTime: minuteToTime(lesson.endMinute), startWeek: lesson.startWeek || 1, endWeek: lesson.endWeek || 30, weekParity: lesson.weekParity || "ALL" }).forEach(([key, value]) => { if (form.elements[key]) form.elements[key].value = value; });
-      state.scheduleFormDirty = true; form.scrollIntoView({ behavior: "smooth", block: "start" });
+      state.scheduleFormDirty = true; form.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
     }));
     document.querySelectorAll("[data-delete-lesson]").forEach((button) => button.addEventListener("click", async () => {
       const lesson = lessons.find((item) => item.id === button.dataset.deleteLesson); if (!lesson || !confirm(`确定删除课程“${lesson.title}”？Mobile 会实时收到删除。`)) return;
@@ -824,7 +846,7 @@ async function renderMail() {
     const item = mailboxes.mailboxes.find((mailbox) => mailbox.mailboxId === button.dataset.editMailbox); if (!item) return;
     const form = document.getElementById("mailboxForm"); form.dataset.editingId = item.mailboxId;
     ["name", "fromAddress", "smtpHost", "smtpPort", "username", "passwordSecretRef", "dailyQuota"].forEach((key) => { form.elements[key].value = item[key] ?? ""; });
-    form.querySelector("button[type='submit'], button.primary-button").textContent = "保存修改"; form.scrollIntoView({ behavior: "smooth" });
+    form.querySelector("button[type='submit'], button.primary-button").textContent = "保存修改"; form.scrollIntoView({ behavior: scrollBehavior() });
   }));
   document.querySelectorAll("[data-delete-mailbox]").forEach((button) => button.addEventListener("click", async () => {
     if (!confirm("确定删除该 SMTP 邮箱？")) return;

@@ -161,7 +161,9 @@ body {
   border-radius: 24px;
   transition: transform 160ms var(--ease), background 160ms var(--ease);
 }
-.metric-card:hover { background: var(--md-surface-container); transform: translateY(-2px); }
+@media (hover: hover) and (pointer: fine) {
+  .metric-card:hover { background: var(--md-surface-container); transform: translateY(-2px); }
+}
 .metric-card:nth-child(2) { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
 .metric-card:nth-child(2) .metric-label, .metric-card:nth-child(2) small { color: color-mix(in srgb, var(--md-on-secondary-container) 72%, transparent); }
 .metric-card:nth-child(3) { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }

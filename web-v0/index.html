@@ -115,7 +115,7 @@
 
     <main class="main-shell">
       <header class="topbar">
-        <button class="mobile-menu" id="mobileMenu" aria-label="打开导航">菜单</button>
+        <button class="mobile-menu" id="mobileMenu" aria-label="打开导航" aria-expanded="false" aria-controls="primaryNav">菜单</button>
         <div class="breadcrumbs"><span>控制台</span><b>/</b><strong id="viewCrumb">运营总览</strong></div>
         <div class="topbar-actions">
           <label class="search"><span>搜索</span><input type="search" placeholder="用户、课表、任务…"></label>
@@ -213,8 +213,8 @@
       </section>
     </main>
 
-    <button class="tweaks-trigger" id="tweaksTrigger" aria-expanded="false">Tweaks</button>
-    <aside class="tweaks" id="tweaks" aria-label="原型调整面板">
+    <button class="tweaks-trigger" id="tweaksTrigger" aria-expanded="false" aria-controls="tweaks">Tweaks</button>
+    <aside class="tweaks" id="tweaks" aria-label="原型调整面板" aria-hidden="true">
       <div class="tweaks-heading"><strong>Tweaks</strong><button id="closeTweaks" aria-label="关闭调整面板">关闭</button></div>
       <label>动态色方案<select id="schemeSelect"><option value="classing">Classing Blue</option><option value="mint">Mint</option><option value="sunrise">Sunrise</option></select></label>
       <label>内容密度<select id="densitySelect"><option value="comfortable">舒展</option><option value="compact">紧凑</option><option value="focus">聚焦</option></select></label>

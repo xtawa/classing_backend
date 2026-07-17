@@ -211,8 +211,11 @@ td { padding: 14px var(--panel-pad); border-top: 1px solid var(--border); }
 .empty-row p { margin: 8px 0 0; font-size: 12px; }
 
 .tweaks-trigger { position: fixed; right: 18px; bottom: 18px; z-index: 30; min-height: 40px; padding: 0 15px; color: #fff; background: var(--ink); border: 1px solid rgba(255,255,255,.1); border-radius: 999px; box-shadow: var(--shadow); cursor: pointer; font: 700 11px/1 Manrope, sans-serif; letter-spacing: .04em; }
-.tweaks { position: fixed; right: 18px; bottom: 70px; z-index: 31; width: 280px; display: none; gap: 16px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); box-shadow: var(--shadow); }
-.tweaks.open { display: grid; animation: panel-in 180ms var(--ease); }
+.tweaks { position: fixed; right: 18px; bottom: 70px; z-index: 31; width: 280px; display: none; gap: 16px; padding: 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); box-shadow: var(--shadow); opacity: 0; transform: translateY(8px) scale(.98); transition: opacity 180ms var(--ease), transform 180ms var(--ease); }
+.tweaks.open { display: grid; opacity: 1; transform: none; }
+@starting-style {
+  .tweaks.open { opacity: 0; transform: translateY(8px) scale(.98); }
+}
 .tweaks-heading { display: flex; align-items: center; justify-content: space-between; }
 .tweaks-heading strong { font: 750 15px/1 Manrope, sans-serif; }
 .tweaks-heading button { color: var(--muted); background: transparent; border: 0; cursor: pointer; font-size: 11px; }
@@ -247,8 +250,6 @@ body.dark {
 body.dark .metric-card.emphasis { background: #254f8f; border-color: #315e9e; }
 body.dark .notice { background: rgba(108,167,255,.08); }
 body.dark .notice-label { color: #b8d2ff; }
-
-@keyframes panel-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 1080px) {
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -286,5 +287,6 @@ body.dark .notice-label { color: #b8d2ff; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition-duration: .01ms !important; }
+  .tweaks.open { transform: none !important; }
 }
