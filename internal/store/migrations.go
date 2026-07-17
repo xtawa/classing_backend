@@ -358,6 +358,19 @@ var migrations = []string{
 		UNIQUE (user_id, client_request_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_ai_requests_user_period ON ai_requests(user_id, created_at DESC)`,
+	`CREATE TABLE IF NOT EXISTS device_authorizations (
+		id TEXT PRIMARY KEY,
+		poll_secret_hash TEXT NOT NULL UNIQUE,
+		user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+		device_name TEXT NOT NULL DEFAULT '',
+		expires_at BIGINT NOT NULL,
+		approved_at BIGINT NOT NULL DEFAULT 0,
+		consumed_at BIGINT NOT NULL DEFAULT 0,
+		request_ip TEXT NOT NULL DEFAULT '',
+		request_ua TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_device_authorizations_expiry ON device_authorizations(expires_at, consumed_at)`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

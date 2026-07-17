@@ -72,10 +72,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/register/email/confirm", s.authRateLimit(http.HandlerFunc(s.confirmRegistrationEmail)))
 	mux.Handle("POST /api/v1/auth/login", s.authRateLimit(http.HandlerFunc(s.login)))
 	mux.Handle("POST /api/v1/auth/refresh", s.authRateLimit(http.HandlerFunc(s.refresh)))
+	mux.Handle("POST /api/v1/auth/device/qr/start", s.authRateLimit(http.HandlerFunc(s.startDeviceAuthorization)))
+	mux.Handle("POST /api/v1/auth/device/qr/poll", s.authRateLimit(http.HandlerFunc(s.pollDeviceAuthorization)))
 	mux.Handle("POST /api/v1/auth/password/reset/request", s.authRateLimit(http.HandlerFunc(s.requestPasswordReset)))
 	mux.Handle("POST /api/v1/auth/password/reset/confirm", s.authRateLimit(http.HandlerFunc(s.confirmPasswordReset)))
 
 	mux.Handle("POST /api/v1/auth/logout", s.requireAuth(http.HandlerFunc(s.logout)))
+	mux.Handle("POST /api/v1/auth/device/qr/approve", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.approveDeviceAuthorization))))
 	mux.Handle("GET /api/v1/account/me", s.requireAuth(http.HandlerFunc(s.accountMe)))
 	mux.Handle("PATCH /api/v1/account/me", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.updateAccount))))
 	mux.Handle("POST /api/v1/account/email/confirm", s.requireAuth(s.sensitiveLimit(s.sensitiveIPLimiter, s.accountWriteAccountLimiter)(http.HandlerFunc(s.confirmEmailChange))))

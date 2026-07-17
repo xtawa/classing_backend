@@ -23,4 +23,4 @@
 
 - [Changelog](CHANGELOG.md)
 
-现有 Android 客户端仍可使用原有顶层 `session`、`account` 和 `membership` 响应结构。管理台扩展接口不会要求修改 Wear 端；Wear 继续只消费手机下发的只读摘要。
+现有 Android 客户端仍可使用原有顶层 `session`、`account` 和 `membership` 响应结构。Wear 默认消费手机下发的只读摘要，也可通过 `API-Wear二维码登录.md` 定义的设备授权流程建立独立会话。

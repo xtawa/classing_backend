@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-07-17 · Wear 二维码设备登录
+
+### Added
+
+- 新增 `POST /api/v1/auth/device/qr/start`、`/poll` 与需登录的 `/approve`。
+- 二维码只携带公开授权编号；Wear 独占的轮询密钥只保存哈希。
+- 授权 5 分钟过期、只能批准和兑换一次；兑换时原子创建独立 Wear 会话。
+- 新增 `device_authorizations` 迁移、过期清理、审计记录和完整端到端测试。
+
+### Client Impact
+
+- Mobile 账号页仅在已登录时提供扫码批准，并在批准前二次确认。
+- Wear 轮询间隔为 5 秒，成功后必须加密保存会话；Token 不得写入二维码、Data Layer 或云文档。
+- 详细契约见 [API-Wear二维码登录.md](./API-Wear二维码登录.md)。
+
 ## 2026-07-13 · Lark SMTP 适配与邮件任务详细日志
 
 ### Added
