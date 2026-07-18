@@ -125,6 +125,13 @@ func (w *Worker) deliverOne(ctx context.Context) {
 		"retryCount":  job.RetryCount,
 		"scheduledAt": job.ScheduledAt,
 	})
+	digest := w.buildBriefingDigest(ctx, job)
+	w.jobLog(ctx, job.ID, "INFO", "briefing.schedule_loaded", "Daily timetable content prepared", map[string]any{
+		"available":   digest.Available,
+		"lessonCount": len(digest.Lessons),
+		"source":      digest.Source,
+		"targetDate":  digest.TargetDate,
+	})
 	usageDate := time.Now().Format("2006-01-02")
 	excluded := map[string]bool{}
 	var deliveredMailbox model.Mailbox
@@ -144,7 +151,7 @@ func (w *Worker) deliverOne(ctx context.Context) {
 			"username":  mailbox.Username,
 			"quota":     fmt.Sprintf("%d/%d", mailbox.UsedToday, mailbox.DailyQuota),
 		})
-		deliveryErr := send(mailbox, job, func(level, event, message string, details map[string]any) {
+		deliveryErr := send(mailbox, job, digest, func(level, event, message string, details map[string]any) {
 			w.jobLog(ctx, job.ID, level, event, message, details)
 		})
 		if deliveryErr == nil {
@@ -198,7 +205,7 @@ func classifyMailError(err error) string {
 
 type mailLogFunc func(level, event, message string, details map[string]any)
 
-func send(mailbox model.Mailbox, job store.ClaimedJob, logStep mailLogFunc) error {
+func send(mailbox model.Mailbox, job store.ClaimedJob, digest briefingDigest, logStep mailLogFunc) error {
 	secretName := strings.TrimPrefix(mailbox.PasswordSecretRef, "env:")
 	if secretName == mailbox.PasswordSecretRef || secretName == "" {
 		emitMailLog(logStep, "ERROR", "smtp.secret_invalid", "Mailbox password secret reference is invalid", map[string]any{"secretRef": mailbox.PasswordSecretRef})
@@ -282,7 +289,7 @@ func send(mailbox model.Mailbox, job store.ClaimedJob, logStep mailLogFunc) erro
 		emitMailLog(logStep, "ERROR", "smtp.data_failed", "SMTP DATA command failed", map[string]any{"error": err.Error()})
 		return fmt.Errorf("smtp data: %w", err)
 	}
-	subjectText, body, err := mailContent(job)
+	subjectText, body, err := mailContent(job, digest)
 	if err != nil {
 		emitMailLog(logStep, "ERROR", "mail.content_failed", "Mail content rendering failed", map[string]any{"error": err.Error(), "channel": job.Channel})
 		return fmt.Errorf("mail content: %w", err)
@@ -327,14 +334,10 @@ func maskEmail(value string) string {
 	return local[:1] + "***" + local[len(local)-1:] + "@" + parts[1]
 }
 
-func mailContent(job store.ClaimedJob) (string, string, error) {
+func mailContent(job store.ClaimedJob, digest briefingDigest) (string, string, error) {
 	switch job.Channel {
 	case "EMAIL", "EMAIL_TEST":
-		return "Classing 每日课程简报", fmt.Sprintf(
-			"你好 %s，\r\n\r\n这是 %s 的 Classing 课程简报。请打开 Classing 查看最新课表、调课与同步状态。\r\n",
-			job.Username,
-			job.TargetDate,
-		), nil
+		return "Classing 每日课程简报", renderBriefingMail(job.Username, digest), nil
 	case "PASSWORD_RESET":
 		var payload struct {
 			Token     string `json:"token"`
