@@ -9,7 +9,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+RUN test "${GIT_COMMIT}" != "unknown" \
+	&& CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 	go build -trimpath -ldflags="-s -w -X github.com/xtawa/classing-backend/internal/buildinfo.Commit=${GIT_COMMIT}" -o /out/classing-backend ./cmd/server \
 	&& CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 	go build -trimpath -ldflags="-s -w" -o /out/classing-storage-audit ./cmd/storage-audit
