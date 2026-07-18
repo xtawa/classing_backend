@@ -97,6 +97,10 @@
 .quota-meter { display: grid; gap: 8px; padding: 16px; margin-top: 14px; background: var(--md-surface-container); border-radius: 18px; }
 .quota-meter > div { display: flex; justify-content: space-between; gap: 12px; }
 .quota-meter progress { width: 100%; height: 10px; overflow: hidden; border: 0; border-radius: 999px; accent-color: var(--md-primary); }
+.quota-inline { min-width: 160px; display: grid; gap: 6px; }
+.quota-inline progress { width: 100%; height: 8px; overflow: hidden; border: 0; border-radius: 999px; accent-color: var(--md-primary); }
+.quota-inline small, .quota-value small { display: block; margin-top: 4px; color: var(--md-on-surface-variant); }
+.compute-rate-table td:not(:first-child), .ai-usage-table td:nth-child(n+3):nth-child(-n+5) { font-variant-numeric: tabular-nums; }
 .payment-layout { display: grid; grid-template-columns: 150px 1fr; gap: 22px; align-items: center; }
 .payment-qr-placeholder { aspect-ratio: 1; display: grid; place-content: center; gap: 4px; color: var(--md-on-surface-variant); background: repeating-linear-gradient(45deg, var(--md-surface-container-high), var(--md-surface-container-high) 10px, var(--md-surface-container-highest) 10px, var(--md-surface-container-highest) 20px); border: 2px dashed var(--md-outline); border-radius: 20px; text-align: center; }
 .payment-copy { display: grid; gap: 8px; line-height: 1.7; }

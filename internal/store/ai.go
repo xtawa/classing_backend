@@ -40,14 +40,15 @@ type AIStartResult struct {
 }
 
 type AIAdminUsage struct {
-	UserID       string `db:"user_id" json:"userId"`
-	Username     string `db:"username" json:"username"`
-	Email        string `db:"email" json:"email"`
-	Period       string `db:"period" json:"period"`
-	Used         int    `db:"used" json:"used"`
-	Reserved     int    `db:"reserved" json:"reserved"`
-	Mode         string `db:"mode" json:"mode"`
-	MonthlyLimit int    `db:"monthly_limit" json:"monthlyLimit"`
+	UserID         string `db:"user_id" json:"userId"`
+	Username       string `db:"username" json:"username"`
+	Email          string `db:"email" json:"email"`
+	Period         string `db:"period" json:"period"`
+	Used           int    `db:"used" json:"used"`
+	Reserved       int    `db:"reserved" json:"reserved"`
+	Mode           string `db:"mode" json:"mode"`
+	MonthlyLimit   int    `db:"monthly_limit" json:"monthlyLimit"`
+	EffectiveLimit int    `db:"effective_limit" json:"effectiveLimit"`
 }
 
 func (s *Store) AIConfig(ctx context.Context) (model.AIConfig, error) {
@@ -384,6 +385,6 @@ func (s *Store) ListAIUsageAdmin(ctx context.Context, limit, offset int) ([]AIAd
 		return nil, 0, err
 	}
 	items := []AIAdminUsage{}
-	err = s.db.SelectContext(ctx, &items, s.rebind(`SELECT u.id AS user_id, u.username, u.email, COALESCE(usage.period, ?) AS period, COALESCE(usage.used, 0) AS used, COALESCE(usage.reserved, 0) AS reserved, COALESCE(quota.mode, 'INHERIT') AS mode, COALESCE(quota.monthly_limit, 0) AS monthly_limit FROM users u LEFT JOIN ai_usage_monthly usage ON usage.user_id=u.id AND usage.period=? LEFT JOIN ai_user_quotas quota ON quota.user_id=u.id ORDER BY usage.used DESC, u.created_at DESC LIMIT ? OFFSET ?`), period, period, limit, offset)
+	err = s.db.SelectContext(ctx, &items, s.rebind(`SELECT u.id AS user_id, u.username, u.email, COALESCE(usage.period, ?) AS period, COALESCE(usage.used, 0) AS used, COALESCE(usage.reserved, 0) AS reserved, COALESCE(quota.mode, 'INHERIT') AS mode, COALESCE(quota.monthly_limit, 0) AS monthly_limit, CASE COALESCE(quota.mode, 'INHERIT') WHEN 'UNLIMITED' THEN -1 WHEN 'BLOCKED' THEN 0 WHEN 'LIMITED' THEN COALESCE(quota.monthly_limit, 0) ELSE ? END AS effective_limit FROM users u LEFT JOIN ai_usage_monthly usage ON usage.user_id=u.id AND usage.period=? LEFT JOIN ai_user_quotas quota ON quota.user_id=u.id ORDER BY usage.used DESC, u.created_at DESC LIMIT ? OFFSET ?`), period, config.DefaultMonthlyLimit, period, limit, offset)
 	return items, total, err
 }

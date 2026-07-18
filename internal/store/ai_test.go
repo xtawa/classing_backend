@@ -76,6 +76,24 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if assistantReplies[started.RequestID] != "Math is next." || assistantReplies[followUp.RequestID] != "Physics follows." {
 				t.Fatalf("assistant replies not associated with requests: %+v", assistantReplies)
 			}
+
+			usage, _, err := data.ListAIUsageAdmin(ctx, 10, 0)
+			if err != nil {
+				t.Fatalf("list admin AI usage: %v", err)
+			}
+			if len(usage) != 1 || usage[0].EffectiveLimit != 10000 {
+				t.Fatalf("admin usage did not expose inherited effective limit: %+v", usage)
+			}
+			if err := data.SetAIQuota(ctx, user.ID, []string{user.ID}, AIQuotaLimited, 2500); err != nil {
+				t.Fatalf("set limited AI quota: %v", err)
+			}
+			usage, _, err = data.ListAIUsageAdmin(ctx, 10, 0)
+			if err != nil {
+				t.Fatalf("list limited admin AI usage: %v", err)
+			}
+			if len(usage) != 1 || usage[0].EffectiveLimit != 2500 {
+				t.Fatalf("admin usage did not expose custom effective limit: %+v", usage)
+			}
 		})
 	}
 }
