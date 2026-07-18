@@ -413,8 +413,17 @@ func (s *Server) adminSetAIConfig(w http.ResponseWriter, r *http.Request) {
 	s.adminAIConfig(w, r)
 }
 func validateAIConfigInput(item model.AIConfig, env string) error {
-	if item.DefaultMonthlyLimit < 0 || item.MaxOutputTokens < 1 || item.MaxOutputTokens > 8192 || item.TimeoutSeconds < 5 || item.TimeoutSeconds > 180 || item.MaxHistoryMessages < 2 || item.MaxHistoryMessages > 200 {
-		return fmt.Errorf("numeric value is invalid")
+	if item.DefaultMonthlyLimit < 0 {
+		return fmt.Errorf("default monthly limit must be non-negative")
+	}
+	if item.MaxOutputTokens < 1 || item.MaxOutputTokens > 8192 {
+		return fmt.Errorf("max output tokens must be between 1 and 8192")
+	}
+	if item.TimeoutSeconds < 5 || item.TimeoutSeconds > 180 {
+		return fmt.Errorf("timeout must be between 5 and 180 seconds")
+	}
+	if item.MaxHistoryMessages < 2 || item.MaxHistoryMessages > 200 {
+		return fmt.Errorf("history message limit must be between 2 and 200")
 	}
 	if item.Enabled != 0 {
 		return validateAIProvider(item, env)

@@ -85,7 +85,7 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if len(usage) != 1 || usage[0].EffectiveLimit != aicost.FreeMonthlyLimit || usage[0].IsMember {
 				t.Fatalf("admin usage did not expose inherited effective limit: %+v", usage)
 			}
-			if err := data.SetAIQuota(ctx, user.ID, []string{user.ID}, AIQuotaLimited, 2500); err != nil {
+			if err := data.SetAIQuota(ctx, user.ID, []string{user.Email}, AIQuotaLimited, 2500); err != nil {
 				t.Fatalf("set limited AI quota: %v", err)
 			}
 			usage, _, err = data.ListAIUsageAdmin(ctx, 10, 0)
@@ -114,7 +114,7 @@ func TestAICreditWalletCarriesOverAndPaysAfterMonthlyQuota(t *testing.T) {
 			if _, err := data.SetMembership(ctx, user.ID, user.ID, "ANNUAL", time.Now().Add(24*time.Hour).UnixMilli(), "GRANT"); err != nil {
 				t.Fatalf("grant membership: %v", err)
 			}
-			balance, err := data.GrantAICredits(ctx, user.ID, user.ID, 500, "manual payment")
+			balance, err := data.GrantAICredits(ctx, user.ID, user.Username, 500, "manual payment")
 			if err != nil || balance != 500 {
 				t.Fatalf("grant AI credits: balance=%d err=%v", balance, err)
 			}
@@ -163,7 +163,7 @@ func TestAIFreeQuotaAndExpiredMemberCreditFreeze(t *testing.T) {
 			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=10000, max_output_tokens=4096, provider_kind='OPENAI_COMPATIBLE', model='deepseek-v4-flash' WHERE id=1`); err != nil {
 				t.Fatalf("enable AI: %v", err)
 			}
-			if _, err := data.GrantAICredits(ctx, user.ID, user.ID, 2500, "previous purchase"); err != nil {
+			if _, err := data.GrantAICredits(ctx, user.ID, user.Email, 2500, "previous purchase"); err != nil {
 				t.Fatalf("grant credits: %v", err)
 			}
 			usage, err := data.AIUsage(ctx, user.ID)

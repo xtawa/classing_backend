@@ -155,15 +155,24 @@ func (s *Store) SetAIQuota(ctx context.Context, actorID string, userIDs []string
 	if mode == AIQuotaLimited && limit < 1 {
 		return ErrInvalid
 	}
+	resolvedUserIDs := make([]string, 0, len(userIDs))
+	seen := make(map[string]struct{}, len(userIDs))
+	for _, identifier := range userIDs {
+		userID, err := s.resolveAIUserID(ctx, identifier)
+		if err != nil {
+			return err
+		}
+		if _, exists := seen[userID]; !exists {
+			seen[userID] = struct{}{}
+			resolvedUserIDs = append(resolvedUserIDs, userID)
+		}
+	}
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for _, userID := range userIDs {
-		if strings.TrimSpace(userID) == "" {
-			return ErrInvalid
-		}
+	for _, userID := range resolvedUserIDs {
 		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_user_quotas (user_id, mode, monthly_limit, updated_by, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode, monthly_limit=excluded.monthly_limit, updated_by=excluded.updated_by, updated_at=excluded.updated_at`), userID, mode, limit, actorID, nowMillis()); err != nil {
 			return normalizeDBError(err)
 		}
@@ -177,6 +186,11 @@ func (s *Store) GrantAICredits(ctx context.Context, actorID, userID string, poin
 	if userID == "" || points < 1 || points > 100000000 || len([]rune(note)) > 240 {
 		return 0, ErrInvalid
 	}
+	resolvedUserID, err := s.resolveAIUserID(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	userID = resolvedUserID
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -204,6 +218,25 @@ func (s *Store) GrantAICredits(ctx context.Context, actorID, userID string, poin
 		return 0, err
 	}
 	return balance, nil
+}
+
+func (s *Store) resolveAIUserID(ctx context.Context, identifier string) (string, error) {
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return "", ErrInvalid
+	}
+	user, err := s.UserByID(ctx, identifier)
+	if err == nil {
+		return user.ID, nil
+	}
+	if err != ErrNotFound {
+		return "", err
+	}
+	user, err = s.UserByIdentifier(ctx, identifier)
+	if err != nil {
+		return "", err
+	}
+	return user.ID, nil
 }
 
 func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStartInput) (AIStartResult, error) {
