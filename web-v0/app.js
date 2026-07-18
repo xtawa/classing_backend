@@ -404,18 +404,25 @@ async function submitAuth(event) {
     if (!legalAgreementUrlsReady()) throw new Error("协议链接配置缺失，请联系管理员");
     if (!document.getElementById("authConsent").checked) throw new Error("请先勾选同意隐私政策、用户协议和个人数据跨境传输协议");
     const register = state.authMode === "register";
-    const payload = register
-      ? { username: document.getElementById("authUsername").value, email: document.getElementById("authEmail").value, password: document.getElementById("authPassword").value }
-      : { identifier: document.getElementById("authIdentifier").value, password: document.getElementById("authPassword").value };
-    payload.consent = authConsentPayload();
+    let payload;
+    if (register && state.registrationChallengeId) {
+      payload = {
+        challengeId: state.registrationChallengeId,
+        verificationCode: document.getElementById("authVerificationCode").value,
+        consent: authConsentPayload(),
+      };
+    } else {
+      payload = register
+        ? { username: document.getElementById("authUsername").value, email: document.getElementById("authEmail").value, password: document.getElementById("authPassword").value }
+        : { identifier: document.getElementById("authIdentifier").value, password: document.getElementById("authPassword").value };
+      payload.consent = authConsentPayload();
+    }
     let path = "/api/v1/auth/login";
     if (register && !state.registrationChallengeId) {
       path = "/api/v1/auth/register/email/request";
       payload.turnstileToken = state.turnstileWidgetId !== null && window.turnstile ? window.turnstile.getResponse(state.turnstileWidgetId) : "";
     } else if (register) {
       path = "/api/v1/auth/register/email/confirm";
-      payload.challengeId = state.registrationChallengeId;
-      payload.verificationCode = document.getElementById("authVerificationCode").value;
     }
     const response = await safeFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const body = await response.json();
