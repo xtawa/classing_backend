@@ -104,7 +104,7 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 	messages := buildAIProviderMessages(started.Config, conversation.Timetable, history, body.Message, time.Now())
 	startedAt := time.Now()
 	var output string
-	output, tokenUsage, providerErr := streamOpenAICompatible(r.Context(), started.Config, secret, messages, func(delta string) error {
+	output, tokenUsage, finishReason, providerErr := streamOpenAICompatible(r.Context(), started.Config, secret, messages, func(delta string) error {
 		output += delta
 		writeSSE(w, "delta", map[string]any{"text": delta})
 		return nil
@@ -133,11 +133,16 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSSE(w, "usage", usage)
-	if err := s.store.FinishAIRequest(r.Context(), started.RequestID, output, "COMPLETE", "", latency); err != nil {
+	truncated := finishReason == "length" || finishReason == "max_tokens"
+	errorCode := ""
+	if truncated {
+		errorCode = "AI_OUTPUT_TRUNCATED"
+	}
+	if err := s.store.FinishAIRequest(r.Context(), started.RequestID, output, "COMPLETE", errorCode, latency); err != nil {
 		writeSSE(w, "error", map[string]any{"code": "AI_PERSIST_FAILED"})
 		return
 	}
-	writeSSE(w, "done", map[string]any{"requestId": started.RequestID, "model": started.Config.Model, "inputTokens": tokenUsage.InputTokens, "cachedInputTokens": tokenUsage.CachedInputTokens, "outputTokens": tokenUsage.OutputTokens, "costPoints": aicost.Points(started.Config.Model, tokenUsage)})
+	writeSSE(w, "done", map[string]any{"requestId": started.RequestID, "model": started.Config.Model, "inputTokens": tokenUsage.InputTokens, "cachedInputTokens": tokenUsage.CachedInputTokens, "outputTokens": tokenUsage.OutputTokens, "costPoints": aicost.Points(started.Config.Model, tokenUsage), "finishReason": finishReason, "truncated": truncated})
 }
 
 func providerMessagesText(messages []providerMessage) string {
@@ -254,7 +259,7 @@ func buildAIScheduleContext(config model.AIConfig, timetable string, now time.Ti
 	return fmt.Sprintf("CURRENT SCHEDULE CONTEXT (system authoritative): current date=%s; day of week=%s; timezone=%s; configured current week=%s; week number mode=%s. Resolve words such as today, tomorrow, this week, and times such as this afternoon using this context. Apply lesson start/end week and parity constraints using the configured current week.", today.Format("2006-01-02"), today.Weekday(), location.String(), week, mode)
 }
 
-func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret string, messages []providerMessage, onDelta func(string) error) (string, aicost.TokenUsage, error) {
+func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret string, messages []providerMessage, onDelta func(string) error) (string, aicost.TokenUsage, string, error) {
 	endpoint := strings.TrimRight(config.BaseURL, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
@@ -262,7 +267,7 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 	body, _ := json.Marshal(map[string]any{"model": config.Model, "messages": messages, "stream": true, "stream_options": map[string]any{"include_usage": true}, "temperature": config.Temperature, "max_tokens": config.MaxOutputTokens})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", aicost.TokenUsage{}, err
+		return "", aicost.TokenUsage{}, "", err
 	}
 	request.Header.Set("Authorization", "Bearer "+secret)
 	request.Header.Set("Content-Type", "application/json")
@@ -270,14 +275,15 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 	client := &http.Client{Timeout: time.Duration(config.TimeoutSeconds) * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return "", aicost.TokenUsage{}, err
+		return "", aicost.TokenUsage{}, "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return "", aicost.TokenUsage{}, fmt.Errorf("provider status %d", response.StatusCode)
+		return "", aicost.TokenUsage{}, "", fmt.Errorf("provider status %d", response.StatusCode)
 	}
 	var result string
 	var tokenUsage aicost.TokenUsage
+	var finishReason string
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
@@ -294,6 +300,7 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 				Delta struct {
 					Content string `json:"content"`
 				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Usage struct {
 				PromptTokens         int `json:"prompt_tokens"`
@@ -305,9 +312,12 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 			continue
 		}
 		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
 			if choice.Delta.Content != "" {
 				if err := onDelta(choice.Delta.Content); err != nil {
-					return result, tokenUsage, err
+					return result, tokenUsage, finishReason, err
 				}
 				result += choice.Delta.Content
 			}
@@ -316,7 +326,7 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 			tokenUsage = aicost.TokenUsage{InputTokens: chunk.Usage.PromptTokens, CachedInputTokens: chunk.Usage.PromptCacheHitTokens, OutputTokens: chunk.Usage.CompletionTokens}
 		}
 	}
-	return result, tokenUsage, scanner.Err()
+	return result, tokenUsage, finishReason, scanner.Err()
 }
 
 func validateAIProvider(item model.AIConfig, environment string) error {
@@ -444,6 +454,23 @@ func (s *Server) adminSetAIQuota(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, principal(r).User.ID, "AI_QUOTA_UPDATE", "AI_QUOTA", "", map[string]any{"users": len(body.UserIDs), "mode": body.Mode, "limit": body.MonthlyLimit})
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
+func (s *Server) adminGrantAICredits(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		UserID string `json:"userId"`
+		Points int    `json:"points"`
+		Note   string `json:"note"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	balance, err := s.store.GrantAICredits(r.Context(), principal(r).User.ID, body.UserID, body.Points, body.Note)
+	if err != nil {
+		writeStoreError(w, r, err, "AI_CREDIT_GRANT")
+		return
+	}
+	s.audit(r, principal(r).User.ID, "AI_CREDIT_GRANT", "USER", strings.TrimSpace(body.UserID), map[string]any{"points": body.Points, "balance": balance, "note": strings.TrimSpace(body.Note)})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "creditBalance": balance})
+}
 func (s *Server) adminSetAIDefaultQuota(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		MonthlyLimit int `json:"monthlyLimit"`
@@ -498,7 +525,7 @@ func (s *Server) adminTestAIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
-	output, _, err := streamOpenAICompatible(ctx, item, secret, []providerMessage{{Role: "user", Content: "Reply with OK."}}, func(string) error { return nil })
+	output, _, _, err := streamOpenAICompatible(ctx, item, secret, []providerMessage{{Role: "user", Content: "Reply with OK."}}, func(string) error { return nil })
 	if err != nil || strings.TrimSpace(output) == "" {
 		writeError(w, r, http.StatusBadGateway, "AI_UPSTREAM_ERROR", "the provider could not complete the test request")
 		return

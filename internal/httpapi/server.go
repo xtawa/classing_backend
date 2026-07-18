@@ -147,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/admin/ai/usage", s.requireAdmin(http.HandlerFunc(s.adminAIUsage)))
 	mux.Handle("PUT /api/v1/admin/ai/quotas/default", s.requireAdmin(http.HandlerFunc(s.adminSetAIDefaultQuota)))
 	mux.Handle("PUT /api/v1/admin/ai/quotas", s.requireAdmin(http.HandlerFunc(s.adminSetAIQuota)))
+	mux.Handle("POST /api/v1/admin/ai/credits", s.requireAdmin(http.HandlerFunc(s.adminGrantAICredits)))
 
 	mux.Handle("/", s.spaHandler())
 	return s.middleware(mux)

@@ -97,3 +97,52 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 		})
 	}
 }
+
+func TestAICreditWalletCarriesOverAndPaysAfterMonthlyQuota(t *testing.T) {
+	for _, dialect := range testDialects(t) {
+		t.Run(dialect.name, func(t *testing.T) {
+			data := dialect.open(t)
+			ctx := context.Background()
+			user, err := data.CreateUser(ctx, "credituser", "credituser@example.test", "hash", model.RoleUser)
+			if err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=1, provider_kind='OPENAI_COMPATIBLE', model='deepseek-v4-flash' WHERE id=1`); err != nil {
+				t.Fatalf("enable AI: %v", err)
+			}
+			balance, err := data.GrantAICredits(ctx, user.ID, user.ID, 500, "manual payment")
+			if err != nil || balance != 500 {
+				t.Fatalf("grant AI credits: balance=%d err=%v", balance, err)
+			}
+
+			started, err := data.StartAIRequest(ctx, user.ID, AIStartInput{
+				ClientRequestID:      "credit-request",
+				Message:              "Summarize my schedule",
+				Timetable:            `{"lessons":[{"title":"Math"}]}`,
+				Model:                "deepseek-v4-flash",
+				EstimatedInputTokens: 1,
+			})
+			if err != nil {
+				t.Fatalf("start request using combined quota: %v", err)
+			}
+			tokens := aicost.TokenUsage{InputTokens: 1, OutputTokens: 100}
+			cost := aicost.Points("deepseek-v4-flash", tokens)
+			usage, err := data.SettleAIQuota(ctx, started.RequestID, tokens)
+			if err != nil {
+				t.Fatalf("settle AI credits: %v", err)
+			}
+			if usage.Used != 1 || usage.CreditBalance != 500-(cost-1) || usage.Reserved != 0 {
+				t.Fatalf("monthly quota was not consumed before persistent credits: cost=%d usage=%+v", cost, usage)
+			}
+
+			adminUsage, _, err := data.ListAIUsageAdmin(ctx, 10, 0)
+			if err != nil || len(adminUsage) != 1 || adminUsage[0].CreditBalance != usage.CreditBalance {
+				t.Fatalf("admin usage missing credit balance: usage=%+v err=%v", adminUsage, err)
+			}
+			var transactions int
+			if err := data.db.GetContext(ctx, &transactions, data.rebind(`SELECT COUNT(*) FROM ai_credit_transactions WHERE user_id=?`), user.ID); err != nil || transactions != 2 {
+				t.Fatalf("credit ledger should contain grant and usage: count=%d err=%v", transactions, err)
+			}
+		})
+	}
+}

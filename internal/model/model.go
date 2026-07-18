@@ -138,22 +138,22 @@ type AppRelease struct {
 // The API key is never stored here; SecretRef only identifies an approved
 // environment variable.
 type AIConfig struct {
-	Enabled              int     `db:"enabled" json:"enabled"`
-	ProviderKind         string  `db:"provider_kind" json:"providerKind"`
-	BaseURL              string  `db:"base_url" json:"baseUrl"`
-	Model                string  `db:"model" json:"model"`
-	SecretRef            string  `db:"secret_ref" json:"secretRef"`
-	SystemPrompt         string  `db:"system_prompt" json:"systemPrompt"`
-	TimetablePrompt      string  `db:"timetable_prompt" json:"timetablePrompt"`
-	Temperature          float64 `db:"temperature" json:"temperature"`
-	MaxOutputTokens      int     `db:"max_output_tokens" json:"maxOutputTokens"`
-	TimeoutSeconds       int     `db:"timeout_seconds" json:"timeoutSeconds"`
-	MaxHistoryMessages   int     `db:"max_history_messages" json:"maxHistoryMessages"`
-	DefaultMonthlyLimit  int     `db:"default_monthly_limit" json:"defaultMonthlyLimit"`
-	QuotaTimezone        string  `db:"quota_timezone" json:"quotaTimezone"`
-	Version              int64   `db:"version" json:"version"`
-	UpdatedBy            string  `db:"updated_by" json:"updatedBy"`
-	UpdatedAt            int64   `db:"updated_at" json:"updatedAt"`
+	Enabled             int     `db:"enabled" json:"enabled"`
+	ProviderKind        string  `db:"provider_kind" json:"providerKind"`
+	BaseURL             string  `db:"base_url" json:"baseUrl"`
+	Model               string  `db:"model" json:"model"`
+	SecretRef           string  `db:"secret_ref" json:"secretRef"`
+	SystemPrompt        string  `db:"system_prompt" json:"systemPrompt"`
+	TimetablePrompt     string  `db:"timetable_prompt" json:"timetablePrompt"`
+	Temperature         float64 `db:"temperature" json:"temperature"`
+	MaxOutputTokens     int     `db:"max_output_tokens" json:"maxOutputTokens"`
+	TimeoutSeconds      int     `db:"timeout_seconds" json:"timeoutSeconds"`
+	MaxHistoryMessages  int     `db:"max_history_messages" json:"maxHistoryMessages"`
+	DefaultMonthlyLimit int     `db:"default_monthly_limit" json:"defaultMonthlyLimit"`
+	QuotaTimezone       string  `db:"quota_timezone" json:"quotaTimezone"`
+	Version             int64   `db:"version" json:"version"`
+	UpdatedBy           string  `db:"updated_by" json:"updatedBy"`
+	UpdatedAt           int64   `db:"updated_at" json:"updatedAt"`
 }
 
 type AIConversation struct {
@@ -179,12 +179,13 @@ type AIMessage struct {
 }
 
 type AIUsage struct {
-	Period    string `db:"period" json:"period"`
-	Limit     int    `db:"monthly_limit" json:"limit"`
-	Used      int    `db:"used" json:"used"`
-	Reserved  int    `db:"reserved" json:"reserved"`
-	Mode      string `db:"mode" json:"mode"`
-	ResetAt   int64  `db:"reset_at" json:"resetAt"`
+	Period        string `db:"period" json:"period"`
+	Limit         int    `db:"monthly_limit" json:"limit"`
+	Used          int    `db:"used" json:"used"`
+	Reserved      int    `db:"reserved" json:"reserved"`
+	CreditBalance int    `db:"credit_balance" json:"creditBalance"`
+	Mode          string `db:"mode" json:"mode"`
+	ResetAt       int64  `db:"reset_at" json:"resetAt"`
 }
 
 const (

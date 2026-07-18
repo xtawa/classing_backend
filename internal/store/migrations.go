@@ -374,6 +374,24 @@ var migrations = []string{
 		created_at BIGINT NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_device_authorizations_expiry ON device_authorizations(expires_at, consumed_at)`,
+	`CREATE TABLE IF NOT EXISTS ai_credit_wallets (
+		user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+		balance INTEGER NOT NULL DEFAULT 0,
+		updated_at BIGINT NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS ai_credit_transactions (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		points INTEGER NOT NULL,
+		balance_after INTEGER NOT NULL,
+		source TEXT NOT NULL,
+		reference_id TEXT NOT NULL DEFAULT '',
+		note TEXT NOT NULL DEFAULT '',
+		actor_id TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_ai_credit_transactions_user ON ai_credit_transactions(user_id, created_at DESC)`,
+	`UPDATE ai_config SET max_output_tokens=4096 WHERE max_output_tokens=1024`,
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

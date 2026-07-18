@@ -20,6 +20,14 @@
 .auth-card { display: grid; gap: 18px; padding: 34px; background: var(--md-surface-container-low); border-radius: 32px; }
 .auth-card h2 { margin: 0; font: 650 30px/1.2 "Google Sans", "Noto Sans SC", sans-serif; }
 .auth-card > div:first-child > p:last-child { margin: 8px 0 0; color: var(--md-on-surface-variant); }
+.qr-auth-card { align-content: start; }
+.qr-login-stage { display: grid; justify-items: center; gap: 18px; min-height: 390px; }
+.qr-code-frame { width: min(320px, 100%); padding: 14px; background: #fff; border-radius: 28px; box-shadow: var(--shadow); }
+.qr-code-frame img { display: block; width: 100%; height: auto; border-radius: 16px; image-rendering: pixelated; }
+.qr-login-status { display: grid; justify-items: center; gap: 5px; text-align: center; }
+.qr-login-status strong { color: var(--md-on-surface); font-size: 16px; }
+.qr-login-status span, .qr-login-status p { margin: 0; color: var(--md-on-surface-variant); font-size: 12px; line-height: 1.6; }
+.qr-login-error .primary-button { margin-top: 10px; }
 .form-field { display: grid; gap: 8px; color: var(--md-on-surface-variant); font-size: 12px; font-weight: 700; }
 .form-field input, .form-field select, .form-field textarea, .inline-input {
   width: 100%; min-height: 52px; padding: 0 16px; color: var(--md-on-surface); background: var(--md-surface-container-highest); border: 0; border-radius: 16px; outline: 0;
@@ -106,9 +114,13 @@
 .payment-copy { display: grid; gap: 8px; line-height: 1.7; }
 .payment-copy p { margin: 0; color: var(--md-on-surface-variant); }
 .payment-copy a { color: var(--md-primary); font-weight: 700; overflow-wrap: anywhere; }
+.payment-copy .purchase-mail-link { width: fit-content; display: inline-flex; align-items: center; color: var(--md-on-secondary-container); text-decoration: none; }
+.payment-copy small { color: var(--md-on-surface-variant); }
+.ai-credit-purchase { grid-template-columns: 180px minmax(0, 1fr); }
 .ai-message { display: grid; gap: 8px; padding: 16px; border-radius: 20px; background: var(--md-surface-container); }
 .ai-message.user { margin-left: min(14%, 72px); background: var(--md-primary-container); color: var(--md-on-primary-container); }
 .ai-message.assistant { margin-right: min(8%, 42px); }
+.ai-truncated-note { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 12px; color: var(--md-on-tertiary-container); background: var(--md-tertiary-container); border-radius: 16px; font-size: 12px; }
 .markdown-body { min-width: 0; overflow-wrap: anywhere; line-height: 1.72; }
 .markdown-body > :first-child { margin-top: 0; }
 .markdown-body > :last-child { margin-bottom: 0; }

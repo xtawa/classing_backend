@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	qrcode "github.com/skip2/go-qrcode"
 	"github.com/xtawa/classing-backend/internal/auth"
 	"github.com/xtawa/classing-backend/internal/ids"
 	"github.com/xtawa/classing-backend/internal/store"
@@ -46,10 +48,16 @@ func (s *Server) startDeviceAuthorization(w http.ResponseWriter, r *http.Request
 		return
 	}
 	qrPayload := fmt.Sprintf("classing://wear-login?authorizationId=%s", url.QueryEscape(authorizationID))
+	qrPNG, err := qrcode.Encode(qrPayload, qrcode.Medium, 320)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "DEVICE_AUTH_QR_FAILED", "could not generate device authorization QR code")
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"authorizationId": authorizationID,
 		"pollSecret":      pollSecret,
 		"qrPayload":       qrPayload,
+		"qrImage":         "data:image/png;base64," + base64.StdEncoding.EncodeToString(qrPNG),
 		"expiresAt":       expiresAt,
 		"intervalSeconds": deviceAuthorizationPollInterval,
 	})

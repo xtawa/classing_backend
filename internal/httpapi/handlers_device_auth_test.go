@@ -18,7 +18,8 @@ func TestWearQRCodeDeviceAuthorizationFlow(t *testing.T) {
 	authorizationID, _ := started["authorizationId"].(string)
 	pollSecret, _ := started["pollSecret"].(string)
 	qrPayload, _ := started["qrPayload"].(string)
-	if authorizationID == "" || pollSecret == "" || !strings.Contains(qrPayload, authorizationID) {
+	qrImage, _ := started["qrImage"].(string)
+	if authorizationID == "" || pollSecret == "" || !strings.Contains(qrPayload, authorizationID) || !strings.HasPrefix(qrImage, "data:image/png;base64,") {
 		t.Fatalf("start response missing secure device credentials: %+v", started)
 	}
 	if strings.Contains(qrPayload, pollSecret) {

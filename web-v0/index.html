@@ -38,11 +38,23 @@
         <label class="consent-row"><input id="authConsent" type="checkbox"><span>您已阅读并同意 <a id="privacyPolicyLink" href="#" target="_blank" rel="noopener">《隐私政策》</a><a id="termsOfServiceLink" href="#" target="_blank" rel="noopener">《用户协议》</a><a id="crossBorderTransferLink" href="#" target="_blank" rel="noopener">《个人数据跨境传输协议》</a></span></label>
         <p class="form-error" id="authError" role="alert"></p>
         <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
+        <button class="tonal-button auth-submit login-only" id="qrLoginButton" type="button">使用 Mobile 扫码登录</button>
         <div class="auth-links">
           <button type="button" id="authSwitch">创建账户</button>
           <button type="button" id="resetLink">忘记密码</button>
         </div>
       </form>
+      <section class="auth-card qr-auth-card" id="qrAuthCard" hidden aria-live="polite">
+        <div>
+          <p class="eyebrow">MOBILE AUTH</p>
+          <h2>使用 Mobile 扫码登录</h2>
+          <p>在 Classing Mobile 的账户页面选择“扫描设备登录二维码”。</p>
+        </div>
+        <div class="qr-login-stage" id="qrLoginStage">
+          <div class="loading-state">正在生成一次性二维码…</div>
+        </div>
+        <button class="tonal-button auth-submit" id="qrLoginBack" type="button">返回密码登录</button>
+      </section>
     </div>
   </section>
 
