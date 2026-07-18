@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/xtawa/classing-backend/internal/aicost"
 	"github.com/xtawa/classing-backend/internal/model"
 )
 
@@ -16,14 +17,16 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create user: %v", err)
 			}
-			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=10, provider_kind='OPENAI_COMPATIBLE', model='test-model' WHERE id=1`); err != nil {
+			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=10000, provider_kind='OPENAI_COMPATIBLE', model='deepseek-v4-flash' WHERE id=1`); err != nil {
 				t.Fatalf("enable AI: %v", err)
 			}
 
 			started, err := data.StartAIRequest(ctx, user.ID, AIStartInput{
-				ClientRequestID: "request-1",
-				Message:         "What class is next?",
-				Timetable:       `{"lessons":[{"title":"Math"}]}`,
+				ClientRequestID:      "request-1",
+				Message:              "What class is next?",
+				Timetable:            `{"lessons":[{"title":"Math"}]}`,
+				Model:                "deepseek-v4-flash",
+				EstimatedInputTokens: 100,
 			})
 			if err != nil {
 				t.Fatalf("start AI request: %v", err)
@@ -31,21 +34,23 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if started.RequestID == "" || started.Conversation.ID == "" {
 				t.Fatalf("missing request or conversation ID: %+v", started)
 			}
-			if _, err := data.CommitAIQuota(ctx, started.RequestID); err != nil {
+			if _, err := data.SettleAIQuota(ctx, started.RequestID, aicost.TokenUsage{InputTokens: 100, OutputTokens: 50}); err != nil {
 				t.Fatalf("commit AI quota: %v", err)
 			}
 			if err := data.FinishAIRequest(ctx, started.RequestID, "Math is next.", "COMPLETE", "", 25); err != nil {
 				t.Fatalf("finish AI request: %v", err)
 			}
 			followUp, err := data.StartAIRequest(ctx, user.ID, AIStartInput{
-				ConversationID:  started.Conversation.ID,
-				ClientRequestID: "request-2",
-				Message:         "And after that?",
+				ConversationID:       started.Conversation.ID,
+				ClientRequestID:      "request-2",
+				Message:              "And after that?",
+				Model:                "deepseek-v4-pro",
+				EstimatedInputTokens: 200,
 			})
 			if err != nil {
 				t.Fatalf("start follow-up AI request: %v", err)
 			}
-			if _, err := data.CommitAIQuota(ctx, followUp.RequestID); err != nil {
+			if _, err := data.SettleAIQuota(ctx, followUp.RequestID, aicost.TokenUsage{InputTokens: 200, CachedInputTokens: 100, OutputTokens: 80}); err != nil {
 				t.Fatalf("commit follow-up AI quota: %v", err)
 			}
 			if err := data.FinishAIRequest(ctx, followUp.RequestID, "Physics follows.", "COMPLETE", "", 25); err != nil {

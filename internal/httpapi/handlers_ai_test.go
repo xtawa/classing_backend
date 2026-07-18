@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +38,37 @@ func TestNormalizeAITimetable(t *testing.T) {
 				t.Fatalf("lessons=%d want=%d", len(root.Lessons), test.want)
 			}
 		})
+	}
+}
+
+func TestStreamOpenAICompatibleCollectsProviderUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		streamOptions, _ := body["stream_options"].(map[string]any)
+		if streamOptions["include_usage"] != true || body["model"] != "deepseek-v4-pro" {
+			t.Fatalf("unexpected provider request: %#v", body)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"prompt_cache_hit_tokens\":80,\"completion_tokens\":15}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	config := model.AIConfig{BaseURL: upstream.URL, Model: "deepseek-v4-pro", TimeoutSeconds: 5, MaxOutputTokens: 100, Temperature: 0.2}
+	var streamed string
+	output, usage, err := streamOpenAICompatible(context.Background(), config, "secret", []providerMessage{{Role: "user", Content: "hello"}}, func(delta string) error {
+		streamed += delta
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "OK" || streamed != "OK" || usage.InputTokens != 120 || usage.CachedInputTokens != 80 || usage.OutputTokens != 15 {
+		t.Fatalf("unexpected response output=%q streamed=%q usage=%+v", output, streamed, usage)
 	}
 }
 

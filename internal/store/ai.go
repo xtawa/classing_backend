@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/xtawa/classing-backend/internal/aicost"
 	"github.com/xtawa/classing-backend/internal/ids"
 	"github.com/xtawa/classing-backend/internal/model"
 )
@@ -21,11 +22,13 @@ const (
 )
 
 type AIStartInput struct {
-	ConversationID  string
-	ClientRequestID string
-	Message         string
-	Timetable       string
-	SourceProjectID string
+	ConversationID       string
+	ClientRequestID      string
+	Message              string
+	Timetable            string
+	SourceProjectID      string
+	Model                string
+	EstimatedInputTokens int
 }
 
 type AIStartResult struct {
@@ -192,10 +195,16 @@ func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStart
 	if err != sql.ErrNoRows {
 		return AIStartResult{}, err
 	}
+	selectedModel, validModel := aicost.Resolve(input.Model)
 	if config.Enabled == 0 || config.DefaultMonthlyLimit < 0 {
 		return AIStartResult{}, ErrForbidden
 	}
-	if usage.Limit == 0 || (usage.Limit > 0 && usage.Used+usage.Reserved >= usage.Limit) {
+	if !validModel {
+		return AIStartResult{}, ErrInvalid
+	}
+	config.Model = selectedModel.ID
+	reservation := aicost.ReservationPoints(config.Model, input.EstimatedInputTokens, config.MaxOutputTokens)
+	if usage.Limit == 0 || (usage.Limit > 0 && usage.Used+usage.Reserved+reservation > usage.Limit) {
 		return AIStartResult{}, ErrUnavailable
 	}
 	if input.ConversationID == "" {
@@ -220,13 +229,13 @@ func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStart
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_messages (id,conversation_id,role,content,status,client_request_id,created_at,completed_at) VALUES (?,?,'USER',?,'PENDING',?,?,0)`), ids.New("aim"), conversation.ID, input.Message, input.ClientRequestID, now); err != nil {
 		return AIStartResult{}, normalizeDBError(err)
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_requests (id,user_id,conversation_id,client_request_id,provider_kind,model,status,created_at) VALUES (?,?,?,?,?,?, 'PENDING', ?)`), requestID, userID, conversation.ID, input.ClientRequestID, config.ProviderKind, config.Model, now); err != nil {
+	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO ai_requests (id,user_id,conversation_id,client_request_id,provider_kind,model,status,reserved_points,created_at) VALUES (?,?,?,?,?,?, 'PENDING', ?, ?)`), requestID, userID, conversation.ID, input.ClientRequestID, config.ProviderKind, config.Model, reservation, now); err != nil {
 		return AIStartResult{}, normalizeDBError(err)
 	}
-	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=reserved+1, updated_at=? WHERE user_id=? AND period=?`), now, userID, usage.Period); err != nil {
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=reserved+?, updated_at=? WHERE user_id=? AND period=?`), reservation, now, userID, usage.Period); err != nil {
 		return AIStartResult{}, err
 	}
-	usage.Reserved++
+	usage.Reserved += reservation
 	if err := tx.Commit(); err != nil {
 		return AIStartResult{}, err
 	}
@@ -257,18 +266,19 @@ func (s *Store) AIHistory(ctx context.Context, userID, conversationID string, ma
 	return items, conversation, nil
 }
 
-func (s *Store) CommitAIQuota(ctx context.Context, requestID string) (model.AIUsage, error) {
+func (s *Store) SettleAIQuota(ctx context.Context, requestID string, tokens aicost.TokenUsage) (model.AIUsage, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return model.AIUsage{}, err
 	}
 	defer tx.Rollback()
 	var req struct {
-		UserID  string `db:"user_id"`
-		Status  string `db:"status"`
-		Counted int    `db:"quota_counted"`
+		UserID         string `db:"user_id"`
+		Model          string `db:"model"`
+		Counted        int    `db:"quota_counted"`
+		ReservedPoints int    `db:"reserved_points"`
 	}
-	if err := tx.GetContext(ctx, &req, s.rebind(`SELECT user_id,status,quota_counted FROM ai_requests WHERE id=?`), requestID); err != nil {
+	if err := tx.GetContext(ctx, &req, s.rebind(`SELECT user_id,model,quota_counted,reserved_points FROM ai_requests WHERE id=?`), requestID); err != nil {
 		return model.AIUsage{}, normalizeDBError(err)
 	}
 	config := model.AIConfig{}
@@ -280,14 +290,15 @@ func (s *Store) CommitAIQuota(ctx context.Context, requestID string) (model.AIUs
 		return model.AIUsage{}, err
 	}
 	if req.Counted == 0 {
-		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=CASE WHEN reserved>0 THEN reserved-1 ELSE 0 END, used=used+1, updated_at=? WHERE user_id=? AND period=?`), nowMillis(), req.UserID, usage.Period); err != nil {
+		points := aicost.Points(req.Model, tokens)
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=CASE WHEN reserved>=? THEN reserved-? ELSE 0 END, used=used+?, updated_at=? WHERE user_id=? AND period=?`), req.ReservedPoints, req.ReservedPoints, points, nowMillis(), req.UserID, usage.Period); err != nil {
 			return model.AIUsage{}, err
 		}
-		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_requests SET quota_counted=1 WHERE id=?`), requestID); err != nil {
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_requests SET quota_counted=1,input_tokens=?,cached_input_tokens=?,output_tokens=?,cost_points=? WHERE id=?`), tokens.InputTokens, tokens.CachedInputTokens, tokens.OutputTokens, points, requestID); err != nil {
 			return model.AIUsage{}, err
 		}
-		usage.Reserved = max(0, usage.Reserved-1)
-		usage.Used++
+		usage.Reserved = max(0, usage.Reserved-req.ReservedPoints)
+		usage.Used += points
 	}
 	if err := tx.Commit(); err != nil {
 		return model.AIUsage{}, err
@@ -305,8 +316,9 @@ func (s *Store) FinishAIRequest(ctx context.Context, requestID, response, status
 		UserID         string `db:"user_id"`
 		ConversationID string `db:"conversation_id"`
 		Counted        int    `db:"quota_counted"`
+		ReservedPoints int    `db:"reserved_points"`
 	}
-	if err := tx.GetContext(ctx, &req, s.rebind(`SELECT user_id,conversation_id,quota_counted FROM ai_requests WHERE id=?`), requestID); err != nil {
+	if err := tx.GetContext(ctx, &req, s.rebind(`SELECT user_id,conversation_id,quota_counted,reserved_points FROM ai_requests WHERE id=?`), requestID); err != nil {
 		return normalizeDBError(err)
 	}
 	if req.Counted == 0 {
@@ -318,7 +330,7 @@ func (s *Store) FinishAIRequest(ctx context.Context, requestID, response, status
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=CASE WHEN reserved>0 THEN reserved-1 ELSE 0 END, updated_at=? WHERE user_id=? AND period=?`), nowMillis(), req.UserID, usage.Period); err != nil {
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_usage_monthly SET reserved=CASE WHEN reserved>=? THEN reserved-? ELSE 0 END, updated_at=? WHERE user_id=? AND period=?`), req.ReservedPoints, req.ReservedPoints, nowMillis(), req.UserID, usage.Period); err != nil {
 			return err
 		}
 	}

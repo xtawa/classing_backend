@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xtawa/classing-backend/internal/aicost"
 	"github.com/xtawa/classing-backend/internal/model"
 	"github.com/xtawa/classing-backend/internal/store"
 )
@@ -23,6 +24,7 @@ type aiChatRequest struct {
 	Message         string          `json:"message"`
 	Timetable       json.RawMessage `json:"timetableSnapshot"`
 	SourceProjectID string          `json:"sourceProjectId"`
+	Model           string          `json:"model"`
 }
 
 func (s *Server) requireAIEntitlement(w http.ResponseWriter, r *http.Request) bool {
@@ -63,7 +65,7 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Timetable = normalized
 	}
-	started, err := s.store.StartAIRequest(r.Context(), principal(r).User.ID, store.AIStartInput{ConversationID: body.ConversationID, ClientRequestID: body.ClientRequestID, Message: body.Message, Timetable: string(body.Timetable), SourceProjectID: body.SourceProjectID})
+	started, err := s.store.StartAIRequest(r.Context(), principal(r).User.ID, store.AIStartInput{ConversationID: body.ConversationID, ClientRequestID: body.ClientRequestID, Message: body.Message, Timetable: string(body.Timetable), SourceProjectID: body.SourceProjectID, Model: body.Model, EstimatedInputTokens: aicost.EstimateTokens(body.Message, string(body.Timetable))})
 	if err != nil {
 		s.writeAIStoreError(w, r, err)
 		return
@@ -102,16 +104,7 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 	messages := buildAIProviderMessages(started.Config, conversation.Timetable, history, body.Message, time.Now())
 	startedAt := time.Now()
 	var output string
-	var usage model.AIUsage
-	output, _, providerErr := streamOpenAICompatible(r.Context(), started.Config, secret, messages, func(delta string) error {
-		if output == "" {
-			if current, err := s.store.CommitAIQuota(r.Context(), started.RequestID); err == nil {
-				usage = current
-				writeSSE(w, "usage", usage)
-			} else {
-				return err
-			}
-		}
+	output, tokenUsage, providerErr := streamOpenAICompatible(r.Context(), started.Config, secret, messages, func(delta string) error {
 		output += delta
 		writeSSE(w, "delta", map[string]any{"text": delta})
 		return nil
@@ -127,12 +120,32 @@ func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, "error", map[string]any{"code": "AI_UPSTREAM_ERROR"})
 		return
 	}
-	_ = usage
+	if tokenUsage.InputTokens <= 0 {
+		tokenUsage.InputTokens = aicost.EstimateTokens(providerMessagesText(messages))
+	}
+	if tokenUsage.OutputTokens <= 0 {
+		tokenUsage.OutputTokens = aicost.EstimateTokens(output)
+	}
+	usage, err := s.store.SettleAIQuota(r.Context(), started.RequestID, tokenUsage)
+	if err != nil {
+		_ = s.store.FinishAIRequest(r.Context(), started.RequestID, output, "FAILED", "AI_QUOTA_SETTLEMENT_FAILED", latency)
+		writeSSE(w, "error", map[string]any{"code": "AI_QUOTA_SETTLEMENT_FAILED"})
+		return
+	}
+	writeSSE(w, "usage", usage)
 	if err := s.store.FinishAIRequest(r.Context(), started.RequestID, output, "COMPLETE", "", latency); err != nil {
 		writeSSE(w, "error", map[string]any{"code": "AI_PERSIST_FAILED"})
 		return
 	}
-	writeSSE(w, "done", map[string]any{"requestId": started.RequestID, "inputTokens": usage.Used, "outputTokens": 0})
+	writeSSE(w, "done", map[string]any{"requestId": started.RequestID, "model": started.Config.Model, "inputTokens": tokenUsage.InputTokens, "cachedInputTokens": tokenUsage.CachedInputTokens, "outputTokens": tokenUsage.OutputTokens, "costPoints": aicost.Points(started.Config.Model, tokenUsage)})
+}
+
+func providerMessagesText(messages []providerMessage) string {
+	var builder strings.Builder
+	for _, message := range messages {
+		builder.WriteString(message.Content)
+	}
+	return builder.String()
 }
 
 func normalizeAITimetable(raw []byte) (json.RawMessage, error) {
@@ -241,15 +254,15 @@ func buildAIScheduleContext(config model.AIConfig, timetable string, now time.Ti
 	return fmt.Sprintf("CURRENT SCHEDULE CONTEXT (system authoritative): current date=%s; day of week=%s; timezone=%s; configured current week=%s; week number mode=%s. Resolve words such as today, tomorrow, this week, and times such as this afternoon using this context. Apply lesson start/end week and parity constraints using the configured current week.", today.Format("2006-01-02"), today.Weekday(), location.String(), week, mode)
 }
 
-func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret string, messages []providerMessage, onDelta func(string) error) (string, model.AIUsage, error) {
+func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret string, messages []providerMessage, onDelta func(string) error) (string, aicost.TokenUsage, error) {
 	endpoint := strings.TrimRight(config.BaseURL, "/")
 	if !strings.HasSuffix(endpoint, "/chat/completions") {
 		endpoint += "/chat/completions"
 	}
-	body, _ := json.Marshal(map[string]any{"model": config.Model, "messages": messages, "stream": true, "temperature": config.Temperature, "max_tokens": config.MaxOutputTokens})
+	body, _ := json.Marshal(map[string]any{"model": config.Model, "messages": messages, "stream": true, "stream_options": map[string]any{"include_usage": true}, "temperature": config.Temperature, "max_tokens": config.MaxOutputTokens})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", model.AIUsage{}, err
+		return "", aicost.TokenUsage{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+secret)
 	request.Header.Set("Content-Type", "application/json")
@@ -257,13 +270,14 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 	client := &http.Client{Timeout: time.Duration(config.TimeoutSeconds) * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return "", model.AIUsage{}, err
+		return "", aicost.TokenUsage{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return "", model.AIUsage{}, fmt.Errorf("provider status %d", response.StatusCode)
+		return "", aicost.TokenUsage{}, fmt.Errorf("provider status %d", response.StatusCode)
 	}
 	var result string
+	var tokenUsage aicost.TokenUsage
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
@@ -281,6 +295,11 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 					Content string `json:"content"`
 				} `json:"delta"`
 			} `json:"choices"`
+			Usage struct {
+				PromptTokens         int `json:"prompt_tokens"`
+				CompletionTokens     int `json:"completion_tokens"`
+				PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+			} `json:"usage"`
 		}
 		if json.Unmarshal([]byte(data), &chunk) != nil {
 			continue
@@ -288,13 +307,16 @@ func streamOpenAICompatible(ctx context.Context, config model.AIConfig, secret s
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
 				if err := onDelta(choice.Delta.Content); err != nil {
-					return result, model.AIUsage{}, err
+					return result, tokenUsage, err
 				}
 				result += choice.Delta.Content
 			}
 		}
+		if chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 {
+			tokenUsage = aicost.TokenUsage{InputTokens: chunk.Usage.PromptTokens, CachedInputTokens: chunk.Usage.PromptCacheHitTokens, OutputTokens: chunk.Usage.CompletionTokens}
+		}
 	}
-	return result, model.AIUsage{}, scanner.Err()
+	return result, tokenUsage, scanner.Err()
 }
 
 func validateAIProvider(item model.AIConfig, environment string) error {
@@ -342,6 +364,9 @@ func (s *Server) aiUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+func (s *Server) aiModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"models": aicost.Catalog(), "defaultModel": aicost.DefaultModel})
 }
 func (s *Server) aiListConversations(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageParams(r)

@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("POST /api/v1/ai/chat", s.requireAuth(s.sensitiveLimit(s.aiIPLimiter, s.aiAccountLimiter)(http.HandlerFunc(s.aiChat))))
 	mux.Handle("GET /api/v1/ai/usage/me", s.requireAuth(http.HandlerFunc(s.aiUsage)))
+	mux.Handle("GET /api/v1/ai/models", s.requireAuth(http.HandlerFunc(s.aiModels)))
 	mux.Handle("GET /api/v1/ai/conversations", s.requireAuth(http.HandlerFunc(s.aiListConversations)))
 	mux.Handle("GET /api/v1/ai/conversations/{id}/messages", s.requireAuth(http.HandlerFunc(s.aiMessages)))
 	mux.Handle("DELETE /api/v1/ai/conversations/{id}", s.requireAuth(http.HandlerFunc(s.aiDeleteConversation)))

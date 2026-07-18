@@ -306,7 +306,8 @@ function showConsole() {
   syncAccountChrome();
   state.cloudEventVersion = loadCloudCursor();
   startSettingsStream();
-  setView(isAdmin() ? "overview" : "schedules");
+  const requestedView = new URLSearchParams(location.search).get("view");
+  setView(requestedView || (isAdmin() ? "overview" : "schedules"));
 }
 
 function syncAccountChrome() {
@@ -637,23 +638,28 @@ async function renderMembership() {
   const response = await api("/api/v1/membership/status"); const item = response.membership;
   setFab(item.isMember ? "会员权益" : "兑换会员");
   content.innerHTML = `<div class="runtime-page">${hero("membership", `<div class="hero-stat"><strong>${item.isMember ? escapeHTML(item.tier) : "FREE"}</strong><span>${item.isMember ? `有效至 ${formatDate(item.expiresAt)}` : "当前方案"}</span></div>`)}
-    <div class="runtime-grid"><section class="runtime-panel half"><h2>当前权益</h2><div class="empty-state"><span class="status-pill ${item.isMember ? "" : "warn"}">${item.isMember ? "会员有效" : "免费账户"}</span><strong>${item.isMember ? escapeHTML(item.tier) : "尚未订阅会员"}</strong><span>${item.isMember ? `到期时间：${formatDate(item.expiresAt, true)}` : "使用兑换码即可升级并解锁官方云同步。"}</span></div></section>
-    ${item.isMember ? "" : `<section class="runtime-panel half"><div class="runtime-panel-header"><h2>兑换会员</h2></div><form class="runtime-form" id="redeemForm"><label class="form-field full"><span>兑换码</span><input name="code" required placeholder="CLS-XXXX-XXXX-XXXX"></label><div class="runtime-actions full"><button class="primary-button">立即兑换</button></div></form></section>`}</div></div>`;
+    <div class="runtime-grid"><section class="runtime-panel half"><h2>当前权益</h2><div class="empty-state"><span class="status-pill ${item.isMember ? "" : "warn"}">${item.isMember ? "会员有效" : "免费账户"}</span><strong>${item.isMember ? escapeHTML(item.tier) : "尚未订阅会员"}</strong><span>${item.isMember ? `到期时间：${formatDate(item.expiresAt, true)}` : "开通后可使用官方云同步与 Ask AI。"}</span></div></section>
+    ${item.isMember ? "" : `<section class="runtime-panel half"><div class="runtime-panel-header"><h2>开通会员</h2><span class="status-pill">10 元 / 年</span></div><div class="payment-layout"><div class="payment-qr-placeholder" role="img" aria-label="收款码位置预留"><strong>收款码</strong><span>位置预留</span></div><div class="payment-copy"><strong>支付后通过邮箱领取兑换码</strong><p>请将包含支付单号的支付截图发送至 <a href="mailto:zeromostia@gmail.com">zeromostia@gmail.com</a>，兑换码将通过邮箱发送。</p></div></div></section><section class="runtime-panel full"><div class="runtime-panel-header"><h2>已有兑换码</h2></div><form class="runtime-form" id="redeemForm"><label class="form-field full"><span>兑换码</span><input name="code" required placeholder="CLS-XXXX-XXXX-XXXX"></label><div class="runtime-actions full"><button class="primary-button">立即兑换</button></div></form></section>`}</div></div>`;
   document.getElementById("redeemForm")?.addEventListener("submit", async (event) => { event.preventDefault(); const code = new FormData(event.currentTarget).get("code"); try { await api("/api/v1/membership/redeem", { method: "POST", body: JSON.stringify({ code }) }); toast("会员权益已更新"); renderMembership(); } catch (error) { toast(error.message, "error"); } });
 }
 
 async function renderAskAI() {
-  const [schedules, usageResponse, conversations] = await Promise.all([
-    api("/api/v1/timetables?limit=100"), api("/api/v1/ai/usage/me"), api("/api/v1/ai/conversations?limit=30"),
+  const [schedules, usageResponse, conversations, modelResponse] = await Promise.all([
+    api("/api/v1/timetables?limit=100"), api("/api/v1/ai/usage/me"), api("/api/v1/ai/conversations?limit=30"), api("/api/v1/ai/models"),
   ]);
   const usage = usageResponse.usage;
+  const models = modelResponse.models || [];
+  state.aiModel = models.some((item) => item.id === state.aiModel) ? state.aiModel : modelResponse.defaultModel;
+  const consumed = usage.limit < 0 ? 0 : Math.min(usage.limit, usage.used + usage.reserved);
+  const remaining = usage.limit < 0 ? "不限" : Math.max(0, usage.limit - usage.used - usage.reserved).toLocaleString("zh-CN");
   setFab("新建对话");
   const active = state.aiConversationId || conversations.conversations[0]?.conversationId || "";
   state.aiConversationId = active;
-  content.innerHTML = `<div class="runtime-page">${hero("askAi", `<div class="hero-stat"><strong>${usage.limit < 0 ? "不限" : `${usage.used}/${usage.limit}`}</strong><span>本月提问</span></div>`) }
+  content.innerHTML = `<div class="runtime-page">${hero("askAi", `<div class="hero-stat"><strong>${remaining}</strong><span>剩余算力点</span></div>`) }
     <div class="runtime-grid"><section class="runtime-panel half"><div class="runtime-panel-header"><h2>会话</h2><button class="tonal-button" id="newAiConversation">新建</button></div>
       <label class="form-field full"><span>新对话课表</span><select id="aiSchedule">${schedules.projects.map((p) => `<option value="${p.projectId}">${escapeHTML(p.name)}</option>`).join("")}</select></label>
-      <p class="form-hint">剩余 ${usage.limit < 0 ? "不限" : Math.max(0, usage.limit - usage.used - usage.reserved)} 次；下次重置 ${formatDate(usage.resetAt, true)}</p>
+      <label class="form-field full"><span>模型</span><select id="aiModel">${models.map((item) => `<option value="${item.id}" ${item.id === state.aiModel ? "selected" : ""}>${escapeHTML(item.name)} · ${escapeHTML(item.description)}</option>`).join("")}</select></label>
+      <div class="quota-meter" id="aiQuotaMeter"><div><strong>本月算力</strong><span>${usage.limit < 0 ? "不限量" : `${usage.used.toLocaleString("zh-CN")} / ${usage.limit.toLocaleString("zh-CN")} 点`}</span></div><progress max="${usage.limit < 0 ? 1 : usage.limit}" value="${consumed}"></progress><p class="form-hint">剩余 ${remaining} 点；${usage.reserved ? `其中 ${usage.reserved} 点正在预留；` : ""}下次重置 ${formatDate(usage.resetAt, true)}</p></div>
       <div class="ai-conversation-list">${conversations.conversations.map((item) => `<button class="tonal-button" data-ai-conversation="${item.conversationId}">${escapeHTML(item.title)}<small>${formatDate(item.updatedAt, true)}</small></button>`).join("") || "<p>还没有会话</p>"}</div>
     </section><section class="runtime-panel half"><div class="runtime-panel-header"><h2 id="aiChatTitle">${active ? "课表问答" : "新对话"}</h2><button class="danger-button" id="deleteAiConversation" ${active ? "" : "disabled"}>删除</button></div>
       <div class="ai-message-list" id="aiMessages"><div class="empty-state"><span>选择历史会话，或直接输入问题开始。</span></div></div>
@@ -663,7 +669,8 @@ async function renderAskAI() {
   document.getElementById("newAiConversation").addEventListener("click", () => { state.aiConversationId = ""; renderAskAI(); });
   document.getElementById("deleteAiConversation").addEventListener("click", async () => { if (!state.aiConversationId || !confirm("永久删除此会话？")) return; await api(`/api/v1/ai/conversations/${state.aiConversationId}`, { method: "DELETE" }); state.aiConversationId = ""; renderAskAI(); });
   if (active) await loadAIMessages(active);
-  document.getElementById("aiChatForm").addEventListener("submit", async (event) => { event.preventDefault(); const message = new FormData(event.currentTarget).get("message").trim(); if (!message) return; await sendAIMessage(message, document.getElementById("aiSchedule").value); event.currentTarget.reset(); });
+  document.getElementById("aiModel").addEventListener("change", (event) => { state.aiModel = event.currentTarget.value; });
+  document.getElementById("aiChatForm").addEventListener("submit", async (event) => { event.preventDefault(); const message = new FormData(event.currentTarget).get("message").trim(); if (!message) return; await sendAIMessage(message, document.getElementById("aiSchedule").value, document.getElementById("aiModel").value); event.currentTarget.reset(); });
 }
 
 async function loadAIMessages(conversationId) {
@@ -673,21 +680,29 @@ async function loadAIMessages(conversationId) {
   target.scrollTop = target.scrollHeight;
 }
 
-async function sendAIMessage(message, projectId) {
+async function sendAIMessage(message, projectId, model) {
   const target = document.getElementById("aiMessages");
   const formButton = document.querySelector("#aiChatForm button"); formButton.disabled = true;
   target.insertAdjacentHTML("beforeend", `<article class="ai-message user"><strong>你</strong><div class="markdown-body"><p>${escapeHTML(message)}</p></div></article><article class="ai-message assistant" id="aiStreaming"><strong>Ask AI</strong><div class="markdown-body"></div></article>`);
   const stream = document.querySelector("#aiStreaming .markdown-body"); let streamedMarkdown = "";
   try {
-    const payload = { conversationId: state.aiConversationId || undefined, clientRequestId: crypto.randomUUID(), message };
+    const payload = { conversationId: state.aiConversationId || undefined, clientRequestId: crypto.randomUUID(), message, model };
     if (!state.aiConversationId) { payload.timetableSnapshot = await loadAITimetableSnapshot(projectId); payload.sourceProjectId = projectId; }
     const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${state.session.accessToken}` };
     const response = await safeFetch("/api/v1/ai/chat", { method: "POST", headers, body: JSON.stringify(payload) });
     if (!response.ok || !response.body) { const error = await response.json().catch(() => ({})); throw new Error(error.message || "Ask AI 暂时不可用"); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = ""; let event = "";
-    while (true) { const { value, done } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true }); const lines = pending.split("\n"); pending = lines.pop(); for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); if (line.startsWith("data:")) { const data = JSON.parse(line.slice(5)); if (event === "conversation") state.aiConversationId = data.conversationId; if (event === "delta") { streamedMarkdown += data.text; stream.innerHTML = renderMarkdown(streamedMarkdown); } if (event === "error") throw new Error(data.message || data.code); event = ""; } } }
+    while (true) { const { value, done } = await reader.read(); if (done) break; pending += decoder.decode(value, { stream: true }); const lines = pending.split("\n"); pending = lines.pop(); for (const line of lines) { if (line.startsWith("event:")) event = line.slice(6).trim(); if (line.startsWith("data:")) { const data = JSON.parse(line.slice(5)); if (event === "conversation") state.aiConversationId = data.conversationId; if (event === "delta") { streamedMarkdown += data.text; stream.innerHTML = renderMarkdown(streamedMarkdown); } if (event === "usage") updateAIQuotaMeter(data); if (event === "error") throw new Error(data.message || data.code); event = ""; } } }
   } catch (error) { stream.innerHTML = `<p>${escapeHTML(`请求失败：${error.message}`)}</p>`; toast(error.message, "error"); }
   finally { formButton.disabled = false; target.scrollTop = target.scrollHeight; }
+}
+
+function updateAIQuotaMeter(usage) {
+  const meter = document.getElementById("aiQuotaMeter"); if (!meter) return;
+  const remaining = usage.limit < 0 ? "不限" : Math.max(0, usage.limit - usage.used - usage.reserved).toLocaleString("zh-CN");
+  meter.querySelector("span").textContent = usage.limit < 0 ? "不限量" : `${usage.used.toLocaleString("zh-CN")} / ${usage.limit.toLocaleString("zh-CN")} 点`;
+  const progress = meter.querySelector("progress"); progress.max = usage.limit < 0 ? 1 : usage.limit; progress.value = usage.limit < 0 ? 0 : Math.min(usage.limit, usage.used + usage.reserved);
+  meter.querySelector("p").textContent = `剩余 ${remaining} 点；下次重置 ${formatDate(usage.resetAt, true)}`;
 }
 
 async function loadAITimetableSnapshot(projectId) {
@@ -710,7 +725,7 @@ async function renderAIAdmin() {
   setFab("保存 AI 配置");
   content.innerHTML = `<div class="runtime-page">${hero("aiAdmin")}
     <div class="runtime-grid"><section class="runtime-panel full"><div class="runtime-panel-header"><h2>提供商与 Prompt</h2><span class="status-pill">${item.secretConfigured ? "密钥已配置" : "密钥缺失"}</span></div>
-      <form class="runtime-form" id="aiConfigForm"><label class="form-field"><span>启用</span><select name="enabled"><option value="0" ${!item.enabled ? "selected" : ""}>关闭</option><option value="1" ${item.enabled ? "selected" : ""}>启用</option></select></label><label class="form-field"><span>模型</span><input name="model" value="${escapeHTML(item.model)}" required></label><label class="form-field full"><span>Base URL</span><input name="baseUrl" value="${escapeHTML(item.baseUrl)}" placeholder="https://provider.example/v1" required></label><label class="form-field"><span>环境变量密钥引用</span><input name="secretRef" value="${escapeHTML(item.secretRef)}" placeholder="AI_PROVIDER_KEY_DEFAULT" required></label><label class="form-field"><span>默认月限额</span><input name="defaultMonthlyLimit" type="number" min="0" value="${Number(item.defaultMonthlyLimit)}"></label><label class="form-field"><span>最大输出 tokens</span><input name="maxOutputTokens" type="number" value="${Number(item.maxOutputTokens)}"></label><label class="form-field"><span>超时（秒）</span><input name="timeoutSeconds" type="number" value="${Number(item.timeoutSeconds)}"></label><label class="form-field"><span>历史消息上限</span><input name="maxHistoryMessages" type="number" value="${Number(item.maxHistoryMessages)}"></label><label class="form-field full"><span>System Prompt</span><textarea name="systemPrompt">${escapeHTML(item.systemPrompt)}</textarea></label><label class="form-field full"><span>课表 Prompt</span><textarea name="timetablePrompt">${escapeHTML(item.timetablePrompt)}</textarea></label><div class="runtime-actions full"><button class="primary-button">保存配置</button></div></form>
+      <form class="runtime-form" id="aiConfigForm"><label class="form-field"><span>启用</span><select name="enabled"><option value="0" ${!item.enabled ? "selected" : ""}>关闭</option><option value="1" ${item.enabled ? "selected" : ""}>启用</option></select></label><label class="form-field"><span>默认模型</span><select name="model"><option value="deepseek-v4-flash" ${item.model !== "deepseek-v4-pro" ? "selected" : ""}>DeepSeek V4 Flash</option><option value="deepseek-v4-pro" ${item.model === "deepseek-v4-pro" ? "selected" : ""}>DeepSeek V4 Pro</option></select></label><label class="form-field full"><span>Base URL</span><input name="baseUrl" value="${escapeHTML(item.baseUrl)}" placeholder="https://provider.example/v1" required></label><label class="form-field"><span>环境变量密钥引用</span><input name="secretRef" value="${escapeHTML(item.secretRef)}" placeholder="AI_PROVIDER_KEY_DEFAULT" required></label><label class="form-field"><span>默认每月算力点</span><input name="defaultMonthlyLimit" type="number" min="0" value="${Number(item.defaultMonthlyLimit)}"></label><label class="form-field"><span>最大输出 tokens</span><input name="maxOutputTokens" type="number" value="${Number(item.maxOutputTokens)}"></label><label class="form-field"><span>超时（秒）</span><input name="timeoutSeconds" type="number" value="${Number(item.timeoutSeconds)}"></label><label class="form-field"><span>历史消息上限</span><input name="maxHistoryMessages" type="number" value="${Number(item.maxHistoryMessages)}"></label><label class="form-field full"><span>System Prompt</span><textarea name="systemPrompt">${escapeHTML(item.systemPrompt)}</textarea></label><label class="form-field full"><span>课表 Prompt</span><textarea name="timetablePrompt">${escapeHTML(item.timetablePrompt)}</textarea></label><div class="runtime-actions full"><button class="primary-button">保存配置</button></div></form>
     </section><section class="runtime-panel full"><h2>批量用户限额</h2><form class="runtime-form" id="aiQuotaForm"><label class="form-field full"><span>用户 ID（逗号分隔）</span><input name="userIds" required></label><label class="form-field"><span>模式</span><select name="mode"><option>INHERIT</option><option>LIMITED</option><option>UNLIMITED</option><option>BLOCKED</option></select></label><label class="form-field"><span>LIMITED 月限额</span><input name="monthlyLimit" type="number" min="0" value="100"></label><div class="runtime-actions full"><button class="primary-button">应用限额</button></div></form></section></div></div>`;
   document.getElementById("aiConfigForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); await api("/api/v1/admin/ai/config", { method:"PUT", body:JSON.stringify({ enabled:Number(data.enabled), providerKind:"OPENAI_COMPATIBLE", baseUrl:data.baseUrl, model:data.model, secretRef:data.secretRef, systemPrompt:data.systemPrompt, timetablePrompt:data.timetablePrompt, temperature:0.2, maxOutputTokens:Number(data.maxOutputTokens), timeoutSeconds:Number(data.timeoutSeconds), maxHistoryMessages:Number(data.maxHistoryMessages), defaultMonthlyLimit:Number(data.defaultMonthlyLimit), quotaTimezone:"Asia/Shanghai" }) }); toast("AI 配置已保存"); renderAIAdmin(); });
   document.getElementById("aiQuotaForm").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); await api("/api/v1/admin/ai/quotas", { method:"PUT", body:JSON.stringify({ userIds:data.userIds.split(",").map((x) => x.trim()).filter(Boolean), mode:data.mode, monthlyLimit:Number(data.monthlyLimit) }) }); toast("用户限额已更新"); });

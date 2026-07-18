@@ -294,7 +294,7 @@ var migrations = []string{
 		max_output_tokens INTEGER NOT NULL DEFAULT 1024,
 		timeout_seconds INTEGER NOT NULL DEFAULT 60,
 		max_history_messages INTEGER NOT NULL DEFAULT 40,
-		default_monthly_limit INTEGER NOT NULL DEFAULT 0,
+		default_monthly_limit INTEGER NOT NULL DEFAULT 10000,
 		quota_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
 		version BIGINT NOT NULL DEFAULT 1,
 		updated_by TEXT NOT NULL DEFAULT '',
@@ -351,6 +351,9 @@ var migrations = []string{
 		quota_counted INTEGER NOT NULL DEFAULT 0,
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
+		cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+		reserved_points INTEGER NOT NULL DEFAULT 0,
+		cost_points INTEGER NOT NULL DEFAULT 0,
 		latency_ms INTEGER NOT NULL DEFAULT 0,
 		error_code TEXT NOT NULL DEFAULT '',
 		created_at BIGINT NOT NULL,
@@ -407,8 +410,52 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRefreshTokenSessionColumn(ctx, tx); err != nil {
 		return err
 	}
+	if err := s.ensureAIComputeColumns(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureAIComputeColumns(ctx context.Context, tx *sqlx.Tx) error {
+	present, err := s.tableExists(ctx, tx, "ai_requests")
+	if err != nil || !present {
+		return err
+	}
+	columns := []struct{ name, definition string }{
+		{"cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"},
+		{"reserved_points", "INTEGER NOT NULL DEFAULT 0"},
+		{"cost_points", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	upgradedLegacyAccounting := false
+	for _, column := range columns {
+		hasColumn, err := s.columnExists(ctx, tx, "ai_requests", column.name)
+		if err != nil {
+			return fmt.Errorf("check ai_requests.%s: %w", column.name, err)
+		}
+		if !hasColumn {
+			upgradedLegacyAccounting = true
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf("ALTER TABLE ai_requests ADD COLUMN %s %s", column.name, column.definition)); err != nil {
+				return fmt.Errorf("add ai_requests.%s: %w", column.name, err)
+			}
+		}
+	}
+	if upgradedLegacyAccounting {
+		// Request counts and compute points are different units. Start the current month clean,
+		// migrate the global default, and scale explicit request-count overrides once.
+		if _, err := tx.ExecContext(ctx, `UPDATE ai_usage_monthly SET used=0, reserved=0`); err != nil {
+			return fmt.Errorf("reset legacy AI request counters: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ai_config SET default_monthly_limit=10000`); err != nil {
+			return fmt.Errorf("upgrade default AI quota: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ai_user_quotas SET monthly_limit=monthly_limit*100 WHERE mode='LIMITED'`); err != nil {
+			return fmt.Errorf("upgrade user AI quotas: %w", err)
+		}
+	} else if _, err := tx.ExecContext(ctx, `UPDATE ai_config SET default_monthly_limit=10000 WHERE default_monthly_limit=0 AND updated_at=0`); err != nil {
+		return fmt.Errorf("initialize default AI quota: %w", err)
 	}
 	return nil
 }
