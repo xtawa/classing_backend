@@ -49,7 +49,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 git worktree add --detach "$build_dir" "$remote_commit"
 target_image="classing-backend:$remote_commit"
-docker build --pull --label "org.opencontainers.image.revision=$remote_commit" -t "$target_image" "$build_dir"
+docker build --pull --build-arg "GIT_COMMIT=$remote_commit" --label "org.opencontainers.image.revision=$remote_commit" -t "$target_image" "$build_dir"
 
 backup_path="$(CLASSING_REPO_DIR="$repo_dir" CLASSING_BACKUP_DIR="$backup_dir" "$repo_dir/deploy/backup.sh")"
 test -s "$backup_path/postgres.dump"

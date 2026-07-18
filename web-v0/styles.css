@@ -105,6 +105,7 @@ button { color: inherit; }
 
 .sidebar-footer { display: grid; gap: 12px; margin-top: auto; padding-top: 18px; border-top: 1px solid var(--sidebar-line); }
 .service-state { display: flex; align-items: center; gap: 8px; padding: 0 8px; color: var(--sidebar-muted); font-size: 11px; }
+.web-version { padding: 0 8px; color: var(--sidebar-muted); font: 600 10px/1.3 Manrope, sans-serif; letter-spacing: .04em; overflow-wrap: anywhere; }
 .service-state > span { width: 7px; height: 7px; background: var(--amber); border-radius: 50%; box-shadow: 0 0 0 3px rgba(231,160,0,.14); }
 .account-chip { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px; color: #fff; background: transparent; border: 0; border-radius: 10px; cursor: pointer; text-align: left; }
 .account-chip:hover { background: rgba(255,255,255,.05); }

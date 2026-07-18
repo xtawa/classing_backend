@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xtawa/classing-backend/internal/auth"
+	"github.com/xtawa/classing-backend/internal/buildinfo"
 	"github.com/xtawa/classing-backend/internal/config"
 	"github.com/xtawa/classing-backend/internal/store"
 )
@@ -62,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /metrics", s.metrics)
+	mux.HandleFunc("GET /api/v1/version", s.version)
 	mux.Handle("GET /api/v1/client/announcements", s.publicClientRateLimit(http.HandlerFunc(s.publicAnnouncements)))
 	mux.Handle("GET /api/v1/client/releases/latest", s.publicClientRateLimit(http.HandlerFunc(s.publicLatestRelease)))
 	mux.Handle("GET /api/v1/client/releases/{id}/download", s.publicClientRateLimit(http.HandlerFunc(s.publicDownloadRelease)))
@@ -147,6 +149,14 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/", s.spaHandler())
 	return s.middleware(mux)
+}
+
+func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
+	revision := buildinfo.Revision()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"webVersion": "web-" + buildinfo.ShortRevision(),
+		"commit":     revision,
+	})
 }
 
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {

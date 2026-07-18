@@ -265,12 +265,27 @@ function isAdmin() { return state.account?.role === "ADMIN"; }
 
 async function boot() {
   bindChrome();
+  loadWebVersion();
   if (!state.session) { showAuth(); return; }
   try {
     const response = await api("/api/v1/account/me");
     state.account = response.account;
     showConsole();
   } catch { signOut(false); }
+}
+
+async function loadWebVersion() {
+  const target = document.getElementById("webVersion");
+  if (!target) return;
+  try {
+    const response = await safeFetch("/api/v1/version");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const value = await response.json();
+    target.textContent = `Web · ${value.webVersion || "unknown"}`;
+    target.title = value.commit || "unknown";
+  } catch {
+    target.textContent = "Web · unknown";
+  }
 }
 
 function showAuth() {
