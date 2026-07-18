@@ -179,13 +179,16 @@ type AIMessage struct {
 }
 
 type AIUsage struct {
-	Period        string `db:"period" json:"period"`
-	Limit         int    `db:"monthly_limit" json:"limit"`
-	Used          int    `db:"used" json:"used"`
-	Reserved      int    `db:"reserved" json:"reserved"`
-	CreditBalance int    `db:"credit_balance" json:"creditBalance"`
-	Mode          string `db:"mode" json:"mode"`
-	ResetAt       int64  `db:"reset_at" json:"resetAt"`
+	Period          string `db:"period" json:"period"`
+	Limit           int    `db:"monthly_limit" json:"limit"`
+	Used            int    `db:"used" json:"used"`
+	Reserved        int    `db:"reserved" json:"reserved"`
+	CreditBalance   int    `db:"credit_balance" json:"creditBalance"`
+	CreditAvailable int    `db:"credit_available" json:"creditAvailable"`
+	CreditFrozen    bool   `db:"credit_frozen" json:"creditFrozen"`
+	IsMember        bool   `db:"is_member" json:"isMember"`
+	Mode            string `db:"mode" json:"mode"`
+	ResetAt         int64  `db:"reset_at" json:"resetAt"`
 }
 
 const (

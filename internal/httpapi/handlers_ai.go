@@ -27,23 +27,7 @@ type aiChatRequest struct {
 	Model           string          `json:"model"`
 }
 
-func (s *Server) requireAIEntitlement(w http.ResponseWriter, r *http.Request) bool {
-	membership, err := s.store.Membership(r.Context(), principal(r).User.ID)
-	if err != nil {
-		writeStoreError(w, r, err, "MEMBERSHIP")
-		return false
-	}
-	if membership.ExpiresAt <= time.Now().UnixMilli() {
-		writeError(w, r, http.StatusForbidden, "AI_MEMBERSHIP_REQUIRED", "an active membership is required for Ask AI")
-		return false
-	}
-	return true
-}
-
 func (s *Server) aiChat(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAIEntitlement(w, r) {
-		return
-	}
 	var body aiChatRequest
 	if !decodeJSON(w, r, &body) {
 		return

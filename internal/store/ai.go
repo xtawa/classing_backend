@@ -50,6 +50,8 @@ type AIAdminUsage struct {
 	MonthlyLimit   int    `db:"monthly_limit" json:"monthlyLimit"`
 	EffectiveLimit int    `db:"effective_limit" json:"effectiveLimit"`
 	CreditBalance  int    `db:"credit_balance" json:"creditBalance"`
+	CreditFrozen   bool   `db:"credit_frozen" json:"creditFrozen"`
+	IsMember       bool   `db:"is_member" json:"isMember"`
 }
 
 func (s *Store) AIConfig(ctx context.Context) (model.AIConfig, error) {
@@ -99,8 +101,9 @@ func (s *Store) aiUsageTx(ctx context.Context, tx *sqlx.Tx, userID string, confi
 		Used          int `db:"used"`
 		Reserved      int `db:"reserved"`
 		CreditBalance int `db:"credit_balance"`
+		IsMember      int `db:"is_member"`
 	}
-	if err := tx.GetContext(ctx, &record, s.rebind(`SELECT used, reserved, COALESCE((SELECT balance FROM ai_credit_wallets WHERE user_id=?), 0) AS credit_balance FROM ai_usage_monthly WHERE user_id=? AND period=?`), userID, userID, period); err != nil {
+	if err := tx.GetContext(ctx, &record, s.rebind(`SELECT used, reserved, COALESCE((SELECT balance FROM ai_credit_wallets WHERE user_id=?), 0) AS credit_balance, CASE WHEN EXISTS(SELECT 1 FROM memberships WHERE user_id=? AND expires_at>?) THEN 1 ELSE 0 END AS is_member FROM ai_usage_monthly WHERE user_id=? AND period=?`), userID, userID, nowMillis(), userID, period); err != nil {
 		return model.AIUsage{}, err
 	}
 	var override struct {
@@ -115,7 +118,14 @@ func (s *Store) aiUsageTx(ctx context.Context, tx *sqlx.Tx, userID string, confi
 	if err != nil {
 		return model.AIUsage{}, err
 	}
-	return model.AIUsage{Period: period, Limit: quotaLimit(override.Mode, override.Limit, config.DefaultMonthlyLimit), Used: record.Used, Reserved: record.Reserved, CreditBalance: record.CreditBalance, Mode: override.Mode, ResetAt: resetAt}, nil
+	isMember := record.IsMember != 0
+	fallbackLimit := aicost.FreeMonthlyLimit
+	creditAvailable := 0
+	if isMember {
+		fallbackLimit = config.DefaultMonthlyLimit
+		creditAvailable = record.CreditBalance
+	}
+	return model.AIUsage{Period: period, Limit: quotaLimit(override.Mode, override.Limit, fallbackLimit), Used: record.Used, Reserved: record.Reserved, CreditBalance: record.CreditBalance, CreditAvailable: creditAvailable, CreditFrozen: !isMember && record.CreditBalance > 0, IsMember: isMember, Mode: override.Mode, ResetAt: resetAt}, nil
 }
 
 func (s *Store) AIUsage(ctx context.Context, userID string) (model.AIUsage, error) {
@@ -242,7 +252,7 @@ func (s *Store) StartAIRequest(ctx context.Context, userID string, input AIStart
 	}
 	config.Model = selectedModel.ID
 	reservation := aicost.ReservationPoints(config.Model, input.EstimatedInputTokens, config.MaxOutputTokens)
-	if usage.Mode == AIQuotaBlocked || (usage.Limit >= 0 && usage.Used+usage.Reserved+reservation > usage.Limit+usage.CreditBalance) {
+	if usage.Mode == AIQuotaBlocked || (usage.Limit >= 0 && usage.Used+usage.Reserved+reservation > usage.Limit+usage.CreditAvailable) {
 		return AIStartResult{}, ErrUnavailable
 	}
 	if input.ConversationID == "" {
@@ -333,7 +343,7 @@ func (s *Store) SettleAIQuota(ctx context.Context, requestID string, tokens aico
 		creditPoints := 0
 		if usage.Limit >= 0 {
 			monthlyPoints = min(points, max(0, usage.Limit-usage.Used))
-			creditPoints = min(points-monthlyPoints, usage.CreditBalance)
+			creditPoints = min(points-monthlyPoints, usage.CreditAvailable)
 			monthlyPoints += points - monthlyPoints - creditPoints
 		}
 		now := nowMillis()
@@ -353,6 +363,7 @@ func (s *Store) SettleAIQuota(ctx context.Context, requestID string, tokens aico
 				return model.AIUsage{}, err
 			}
 			usage.CreditBalance = balance
+			usage.CreditAvailable = balance
 		}
 		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE ai_requests SET quota_counted=1,input_tokens=?,cached_input_tokens=?,output_tokens=?,cost_points=? WHERE id=?`), tokens.InputTokens, tokens.CachedInputTokens, tokens.OutputTokens, points, requestID); err != nil {
 			return model.AIUsage{}, err
@@ -444,6 +455,14 @@ func (s *Store) ListAIUsageAdmin(ctx context.Context, limit, offset int) ([]AIAd
 		return nil, 0, err
 	}
 	items := []AIAdminUsage{}
-	err = s.db.SelectContext(ctx, &items, s.rebind(`SELECT u.id AS user_id, u.username, u.email, COALESCE(usage.period, ?) AS period, COALESCE(usage.used, 0) AS used, COALESCE(usage.reserved, 0) AS reserved, COALESCE(quota.mode, 'INHERIT') AS mode, COALESCE(quota.monthly_limit, 0) AS monthly_limit, CASE COALESCE(quota.mode, 'INHERIT') WHEN 'UNLIMITED' THEN -1 WHEN 'BLOCKED' THEN 0 WHEN 'LIMITED' THEN COALESCE(quota.monthly_limit, 0) ELSE ? END AS effective_limit, COALESCE(wallet.balance, 0) AS credit_balance FROM users u LEFT JOIN ai_usage_monthly usage ON usage.user_id=u.id AND usage.period=? LEFT JOIN ai_user_quotas quota ON quota.user_id=u.id LEFT JOIN ai_credit_wallets wallet ON wallet.user_id=u.id ORDER BY usage.used DESC, u.created_at DESC LIMIT ? OFFSET ?`), period, config.DefaultMonthlyLimit, period, limit, offset)
+	err = s.db.SelectContext(ctx, &items, s.rebind(`SELECT u.id AS user_id, u.username, u.email, COALESCE(usage.period, ?) AS period, COALESCE(usage.used, 0) AS used, COALESCE(usage.reserved, 0) AS reserved, COALESCE(quota.mode, 'INHERIT') AS mode, COALESCE(quota.monthly_limit, 0) AS monthly_limit, COALESCE(wallet.balance, 0) AS credit_balance, CASE WHEN COALESCE(membership.expires_at, 0)>? THEN 1 ELSE 0 END AS is_member FROM users u LEFT JOIN ai_usage_monthly usage ON usage.user_id=u.id AND usage.period=? LEFT JOIN ai_user_quotas quota ON quota.user_id=u.id LEFT JOIN ai_credit_wallets wallet ON wallet.user_id=u.id LEFT JOIN memberships membership ON membership.user_id=u.id ORDER BY usage.used DESC, u.created_at DESC LIMIT ? OFFSET ?`), period, nowMillis(), period, limit, offset)
+	for index := range items {
+		fallbackLimit := aicost.FreeMonthlyLimit
+		if items[index].IsMember {
+			fallbackLimit = config.DefaultMonthlyLimit
+		}
+		items[index].EffectiveLimit = quotaLimit(items[index].Mode, items[index].MonthlyLimit, fallbackLimit)
+		items[index].CreditFrozen = !items[index].IsMember && items[index].CreditBalance > 0
+	}
 	return items, total, err
 }

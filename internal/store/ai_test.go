@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/xtawa/classing-backend/internal/aicost"
 	"github.com/xtawa/classing-backend/internal/model"
@@ -81,7 +82,7 @@ func TestAIRequestPersistsUserAndAssistantMessages(t *testing.T) {
 			if err != nil {
 				t.Fatalf("list admin AI usage: %v", err)
 			}
-			if len(usage) != 1 || usage[0].EffectiveLimit != 10000 {
+			if len(usage) != 1 || usage[0].EffectiveLimit != aicost.FreeMonthlyLimit || usage[0].IsMember {
 				t.Fatalf("admin usage did not expose inherited effective limit: %+v", usage)
 			}
 			if err := data.SetAIQuota(ctx, user.ID, []string{user.ID}, AIQuotaLimited, 2500); err != nil {
@@ -109,6 +110,9 @@ func TestAICreditWalletCarriesOverAndPaysAfterMonthlyQuota(t *testing.T) {
 			}
 			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=1, provider_kind='OPENAI_COMPATIBLE', model='deepseek-v4-flash' WHERE id=1`); err != nil {
 				t.Fatalf("enable AI: %v", err)
+			}
+			if _, err := data.SetMembership(ctx, user.ID, user.ID, "ANNUAL", time.Now().Add(24*time.Hour).UnixMilli(), "GRANT"); err != nil {
+				t.Fatalf("grant membership: %v", err)
 			}
 			balance, err := data.GrantAICredits(ctx, user.ID, user.ID, 500, "manual payment")
 			if err != nil || balance != 500 {
@@ -142,6 +146,53 @@ func TestAICreditWalletCarriesOverAndPaysAfterMonthlyQuota(t *testing.T) {
 			var transactions int
 			if err := data.db.GetContext(ctx, &transactions, data.rebind(`SELECT COUNT(*) FROM ai_credit_transactions WHERE user_id=?`), user.ID); err != nil || transactions != 2 {
 				t.Fatalf("credit ledger should contain grant and usage: count=%d err=%v", transactions, err)
+			}
+		})
+	}
+}
+
+func TestAIFreeQuotaAndExpiredMemberCreditFreeze(t *testing.T) {
+	for _, dialect := range testDialects(t) {
+		t.Run(dialect.name, func(t *testing.T) {
+			data := dialect.open(t)
+			ctx := context.Background()
+			user, err := data.CreateUser(ctx, "freeuser", "freeuser@example.test", "hash", model.RoleUser)
+			if err != nil {
+				t.Fatalf("create user: %v", err)
+			}
+			if _, err := data.db.ExecContext(ctx, `UPDATE ai_config SET enabled=1, default_monthly_limit=10000, max_output_tokens=4096, provider_kind='OPENAI_COMPATIBLE', model='deepseek-v4-flash' WHERE id=1`); err != nil {
+				t.Fatalf("enable AI: %v", err)
+			}
+			if _, err := data.GrantAICredits(ctx, user.ID, user.ID, 2500, "previous purchase"); err != nil {
+				t.Fatalf("grant credits: %v", err)
+			}
+			usage, err := data.AIUsage(ctx, user.ID)
+			if err != nil {
+				t.Fatalf("free usage: %v", err)
+			}
+			if usage.Limit != aicost.FreeMonthlyLimit || usage.IsMember || !usage.CreditFrozen || usage.CreditAvailable != 0 || usage.CreditBalance != 2500 {
+				t.Fatalf("unexpected free usage: %+v", usage)
+			}
+			if _, err := data.db.ExecContext(ctx, data.rebind(`UPDATE ai_usage_monthly SET used=? WHERE user_id=? AND period=?`), 450, user.ID, usage.Period); err != nil {
+				t.Fatalf("seed free usage: %v", err)
+			}
+			_, err = data.StartAIRequest(ctx, user.ID, AIStartInput{ClientRequestID: "free-over-limit", Message: "question", Timetable: `{"lessons":[{"title":"Math"}]}`, Model: "deepseek-v4-flash", EstimatedInputTokens: 1})
+			if err != ErrUnavailable {
+				t.Fatalf("frozen credits should not extend free quota: %v", err)
+			}
+			if _, err := data.SetMembership(ctx, user.ID, user.ID, "ANNUAL", time.Now().Add(24*time.Hour).UnixMilli(), "GRANT"); err != nil {
+				t.Fatalf("activate membership: %v", err)
+			}
+			usage, err = data.AIUsage(ctx, user.ID)
+			if err != nil || !usage.IsMember || usage.CreditFrozen || usage.CreditAvailable != 2500 || usage.Limit != 10000 {
+				t.Fatalf("unexpected member usage: %+v err=%v", usage, err)
+			}
+			if _, err := data.SetMembership(ctx, user.ID, user.ID, "FREE", 0, "REVOKE"); err != nil {
+				t.Fatalf("expire membership: %v", err)
+			}
+			usage, err = data.AIUsage(ctx, user.ID)
+			if err != nil || usage.IsMember || !usage.CreditFrozen || usage.CreditAvailable != 0 || usage.CreditBalance != 2500 {
+				t.Fatalf("expired membership did not refreeze credits: %+v err=%v", usage, err)
 			}
 		})
 	}

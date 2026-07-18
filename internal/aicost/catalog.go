@@ -8,6 +8,7 @@ import (
 const (
 	DefaultModel        = "deepseek-v4-flash"
 	DefaultMonthlyLimit = 10000
+	FreeMonthlyLimit    = 500
 )
 
 // Model describes the public model catalog and its retail compute-point rates.
